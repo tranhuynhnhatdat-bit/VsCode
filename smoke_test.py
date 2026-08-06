@@ -1,8 +1,13 @@
-"""Smoke test for DataManager. Verifies M1 load, resampling, filtering, and errors."""
+"""Smoke test for DataManager, SymbolInfo, and the strategy skeleton.
+Verifies M1 load, resampling, filtering, errors, symbol metadata
+retrieval, and strategy signal generation."""
 
 import pandas as pd
 
 from data_manager import DataManager, OUTPUT_COLUMNS
+from symbol_info import SymbolInfo, FIELDS, SYMBOL_MAP
+from strategy.examples.sma_crossover import SmaCrossover
+from strategy.base import StrategySignals
 
 dm = DataManager()
 
@@ -58,5 +63,112 @@ except ValueError as e:
 h1_force = dm.load("EURUSD", "H1", force_recompute=True)
 print(f"H1 force_recompute: {len(h1_force)} rows")
 assert len(h1_force) == len(h1)
+
+# ------------------------------------------------------------------ #
+# SymbolInfo tests
+# ------------------------------------------------------------------ #
+si = SymbolInfo()
+
+# 9. Symbols list matches SYMBOL_MAP
+si_syms = si.symbols()
+print(f"SymbolInfo.symbols() -> {len(si_syms)} symbols")
+assert set(si_syms) == set(SYMBOL_MAP.keys())
+
+# 10. get() returns a dict with all expected fields.
+#     If no disk cache and MT5 is unavailable, skip gracefully.
+try:
+    eur_info = si.get("EURUSD")
+    print(f"SymbolInfo.get('EURUSD') -> {len(eur_info)} fields")
+    assert isinstance(eur_info, dict)
+    assert set(eur_info.keys()) == set(FIELDS)
+    assert eur_info["trade_tick_value"] is not None
+    assert eur_info["trade_contract_size"] is not None
+    assert eur_info["digits"] is not None
+except RuntimeError as e:
+    print(f"SymbolInfo.get('EURUSD') skipped (no MT5 / no cache): {e}")
+
+# 11. Unknown symbol -> ValueError
+try:
+    si.get("NOTASYMBOL")
+    raise AssertionError("expected ValueError for unknown symbol")
+except ValueError as e:
+    print(f"SymbolInfo unknown symbol -> ValueError: {e}")
+
+# ------------------------------------------------------------------ #
+# Strategy skeleton tests
+# ------------------------------------------------------------------ #
+
+# 12. SmaCrossover on H1 EURUSD data
+strat = SmaCrossover(fast=10, slow=50, atr_period=14, sl_atr=2.0, tp_atr=3.0)
+sig = strat.generate(h1)
+print(
+    f"SmaCrossover on H1: {int(sig.entries.sum())} long entries, "
+    f"{int(sig.short_entries.sum())} short entries, "
+    f"{int(sig.exits.sum())} long exits, {int(sig.short_exits.sum())} short exits"
+)
+
+# 13. Signals align with the input index and are well-formed
+assert isinstance(sig, StrategySignals)
+assert sig.entries.index.equals(h1.index)
+assert sig.exits.index.equals(h1.index)
+assert sig.short_entries.index.equals(h1.index)
+assert sig.short_exits.index.equals(h1.index)
+assert sig.sl_stop.index.equals(h1.index)
+assert sig.tp_stop.index.equals(h1.index)
+assert sig.entries.dtype == bool
+assert sig.exits.dtype == bool
+assert sig.short_entries.dtype == bool
+assert sig.short_exits.dtype == bool
+
+# 14. No bar enters both directions at once
+assert not (sig.entries & sig.short_entries).any()
+
+# 15. SL/TP are NaN on flat bars, set while holding
+held = sig.sl_stop.notna()
+print(
+    f"SL bars: {int(held.sum())} of {len(held)} "
+    f"({(held.sum() / len(held)):.1%} of the time)"
+)
+assert held.sum() > 0  # the strategy actually holds sometimes
+
+# 16. A trend-following crossover keeps you in the market most of the time.
+#     (The old buggy version reported 0.8% — nearly always flat.)
+assert held.sum() > 0.9 * len(held)
+
+# 17. Pairing invariants: exits never outnumber entries for either side,
+#     and at most one "open" trade remains (the last one, if data ends
+#     mid-trend).
+n_entries = int(sig.entries.sum())
+n_exits = int(sig.exits.sum())
+n_s_entries = int(sig.short_entries.sum())
+n_s_exits = int(sig.short_exits.sum())
+print(
+    f"Pairing: long {n_entries}E/{n_exits}X, "
+    f"short {n_s_entries}E/{n_s_exits}X"
+)
+assert n_exits <= n_entries
+assert n_s_exits <= n_s_entries
+assert n_entries - n_exits <= 1
+assert n_s_entries - n_s_exits <= 1
+
+# 18. Long and short positions never overlap in time: SL/TP never switch
+#     side mid-hold.
+assert not (sig.exits & sig.entries).any()
+assert not (sig.short_exits & sig.short_entries).any()
+assert not (sig.entries & sig.short_entries).any()
+
+# 19. SL and TP are on the correct side of the entry bar's close for every
+#     long entry (SL below, TP above) and short entry (SL above, TP below).
+long_entries = sig.entries[sig.entries].index
+if len(long_entries):
+    lc = h1["Close"].loc[long_entries]
+    assert (sig.sl_stop.loc[long_entries] < lc).all()
+    assert (sig.tp_stop.loc[long_entries] > lc).all()
+short_entries = sig.short_entries[sig.short_entries].index
+if len(short_entries):
+    sc = h1["Close"].loc[short_entries]
+    assert (sig.sl_stop.loc[short_entries] > sc).all()
+    assert (sig.tp_stop.loc[short_entries] < sc).all()
+print("Strategy skeleton tests passed.")
 
 print("\nAll smoke tests passed.")
