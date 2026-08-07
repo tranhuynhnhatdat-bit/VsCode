@@ -9,6 +9,8 @@ from symbol_info import SymbolInfo, FIELDS, SYMBOL_MAP
 from strategy.examples.sma_crossover import SmaCrossover
 from strategy.base import StrategySignals
 from backtest.engine import BacktestEngine, BacktestResult
+from optimization.engine import TestEngine, OptimizationResult
+from optimization.genetic import GAConfig
 
 dm = DataManager()
 
@@ -210,5 +212,55 @@ assert png_path.exists()
 assert png_path.suffix == ".png"
 
 print("Backtesting engine tests passed.")
+
+# ------------------------------------------------------------------ #
+# TestEngine (optimization) tests
+# ------------------------------------------------------------------ #
+
+# 24. Tiny GA on a 6-month window: population 3, 2 generations, early stop
+#     on budget. Keeps the smoke test fast.
+small_config = GAConfig(
+    population=3,
+    generations=2,
+    tournament_k=2,
+    elitism=1,
+    mutation_rate=0.20,
+    early_stop_generations=1,
+    max_evaluations=4,
+    seed=42,
+)
+optimizer = TestEngine(
+    symbol="EURUSD",
+    timeframe="H1",
+    strategy_class=SmaCrossover,
+    param_space={
+        "fast": {"min": 5, "max": 15, "step": 5},
+        "slow": {"min": 20, "max": 40, "step": 10},
+        "atr_period": [14],
+        "sl_atr": [2.0],
+        "tp_atr": [3.0],
+    },
+    split=(0.30, 0.50, 0.20),
+    constraints=[("fast", "<", "slow")],
+    ga_config=small_config,
+    strategy_name="smoke_opt",
+    start="2023-07-01",
+    end="2023-12-31",
+)
+opt_result = optimizer.optimize()
+
+# 25. Result structure (budget is generation-granular, so the full 2x3
+#     population may evaluate: max 6).
+assert isinstance(opt_result, OptimizationResult)
+assert opt_result.report.history
+assert 0 < len(opt_result.report.history) <= 6
+assert opt_result.summary_path is not None
+assert opt_result.summary_path.exists()
+
+# 26. GA never produced invalid (fast >= slow) individuals.
+for rec in opt_result.report.history:
+    assert rec.params["fast"] < rec.params["slow"]
+
+print("TestEngine (optimization) tests passed.")
 
 print("\nAll smoke tests passed.")
