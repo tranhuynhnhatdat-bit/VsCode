@@ -173,6 +173,7 @@ class GAConfig:
     max_evaluations: int | None = None
     initial_population: list[dict[str, Any]] | None = None
     seed: int | None = None
+    workers: int = 1
 
 
 @dataclass
@@ -205,6 +206,8 @@ class GeneticOptimizer:
         fitness_fn: FitnessFn,
         config: GAConfig,
         constraints: list[tuple[str, str, str]] | None = None,
+        batch_fitness_fn: Callable[[list[dict[str, Any]]], list[float]]
+        | None = None,
     ) -> None:
         if config.population < 1:
             raise ValueError("population must be >= 1")
@@ -216,6 +219,7 @@ class GeneticOptimizer:
             raise ValueError("mutation_rate must be in (0, 1]")
         self.space = param_space
         self.fitness_fn = fitness_fn
+        self.batch_fitness_fn = batch_fitness_fn
         self.config = config
         self.is_valid = make_validator(constraints)
         self.rng = random.Random(config.seed)
@@ -254,7 +258,15 @@ class GeneticOptimizer:
         fitness: list[float] = []
 
         for gen in range(cfg.generations):
-            fitness = [_eval(ind, i) for i, ind in enumerate(pop)]
+            if self.batch_fitness_fn is not None and cfg.workers > 1:
+                fits = self.batch_fitness_fn(pop)
+                fitness = []
+                for ind, fit in zip(pop, fits):
+                    history.append(IndividualRecord(dict(ind), fit, order))
+                    order += 1
+                    fitness.append(fit)
+            else:
+                fitness = [_eval(ind, i) for i, ind in enumerate(pop)]
             gen_best = max(fitness)
             if gen_best > best_fitness:
                 best_fitness = gen_best

@@ -219,6 +219,104 @@ class BacktestEngine:
             strategy_name=self.strategy_name,
         )
 
+    def run_htf(self, signals: StrategySignals, htf_df: pd.DataFrame) -> BacktestResult:
+        """Backtest on the strategy's native timeframe directly (no M1 mapping).
+
+        Fills at the next HTF bar open after the signal bar; SL/TP evaluated
+        on HTF bars only. Faster but less realistic than run() (no intra-bar
+        fills). Used by the optimizer's fast H1 screen.
+        """
+        signals.validate(htf_df)
+
+        info = self._si.get(self.symbol)
+        tick_value = float(info["trade_tick_value"])
+        tick_size = float(info["trade_tick_size"])
+        volume_step = float(info["volume_step"])
+        volume_min = float(info["volume_min"])
+        volume_max = float(info["volume_max"])
+        spread = float(info["spread"])
+        swap_long = float(info["swap_long"])
+        swap_short = float(info["swap_short"])
+        swap_rollover3days = int(info["swap_rollover3days"])
+
+        # Fill at the next HTF bar open (no lookahead).
+        entries = signals.entries.shift(1).fillna(False).astype(bool)
+        exits = signals.exits.shift(1).fillna(False).astype(bool)
+        s_entries = signals.short_entries.shift(1).fillna(False).astype(bool)
+        s_exits = signals.short_exits.shift(1).fillna(False).astype(bool)
+
+        # Per-entry lot sizes (risk % of initial equity).
+        size = self._compute_sizes(
+            entries,
+            s_entries,
+            signals.sl_stop,
+            htf_df["Open"],
+            tick_value,
+            tick_size,
+            volume_step,
+            volume_min,
+            volume_max,
+        )
+
+        # Scale prices so vectorbt PnL = real forex PnL in deposit currency.
+        scale = tick_value / tick_size
+        close = htf_df["Close"] * scale
+        open_ = htf_df["Open"] * scale
+        high = htf_df["High"] * scale
+        low = htf_df["Low"] * scale
+        sl_scaled = signals.sl_stop * scale
+        tp_scaled = signals.tp_stop * scale
+
+        # Spread as a fixed fee on entry.
+        fixed_fees = pd.Series(0.0, index=htf_df.index)
+        entry_bars = entries | s_entries
+        fixed_fees.loc[entry_bars] = spread * tick_value * size.loc[entry_bars]
+
+        # Run vectorbt on the HTF bars directly.
+        import vectorbt as vb
+
+        pf = vb.Portfolio.from_signals(
+            close=close,
+            entries=entries,
+            exits=exits,
+            short_entries=s_entries,
+            short_exits=s_exits,
+            size=size,
+            open=open_,
+            high=high,
+            low=low,
+            sl_stop=sl_scaled,
+            tp_stop=tp_scaled,
+            fixed_fees=fixed_fees,
+            init_cash=self.initial_capital,
+            lock_cash=False,
+            accumulate=False,
+            upon_opposite_entry="ignore",
+            freq=_HTF_OFFSET[self.timeframe],
+        )
+
+        # Post-process swap and build equity curve.
+        trades = pf.trades.records
+        htf_equity = pf.value()
+        swap_series = self._compute_swap(
+            trades, htf_df.index, swap_long, swap_short, swap_rollover3days
+        )
+        htf_equity_adj = htf_equity - swap_series.cumsum()
+        daily_equity = htf_equity_adj.resample("D").last().dropna()
+
+        metrics = self._compute_metrics(
+            daily_equity, trades, htf_df.index, htf_equity_adj
+        )
+
+        return BacktestResult(
+            metrics=metrics,
+            equity_curve=daily_equity,
+            trades=trades,
+            symbol=self.symbol,
+            timeframe=self.timeframe,
+            strategy_name=self.strategy_name,
+        )
+
     # ------------------------------------------------------------------ #
     # HTF -> M1 mapping
     # ------------------------------------------------------------------ #
