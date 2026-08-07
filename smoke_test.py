@@ -1,6 +1,6 @@
-"""Smoke test for DataManager, SymbolInfo, and the strategy skeleton.
-Verifies M1 load, resampling, filtering, errors, symbol metadata
-retrieval, and strategy signal generation."""
+"""Smoke test for DataManager, SymbolInfo, the strategy skeleton, and the
+backtesting engine. Verifies M1 load, resampling, filtering, errors, symbol
+metadata retrieval, strategy signal generation, and end-to-end backtest."""
 
 import pandas as pd
 
@@ -8,6 +8,7 @@ from data_manager import DataManager, OUTPUT_COLUMNS
 from symbol_info import SymbolInfo, FIELDS, SYMBOL_MAP
 from strategy.examples.sma_crossover import SmaCrossover
 from strategy.base import StrategySignals
+from backtest.engine import BacktestEngine, BacktestResult
 
 dm = DataManager()
 
@@ -170,5 +171,44 @@ if len(short_entries):
     assert (sig.sl_stop.loc[short_entries] > sc).all()
     assert (sig.tp_stop.loc[short_entries] < sc).all()
 print("Strategy skeleton tests passed.")
+
+# ------------------------------------------------------------------ #
+# Backtesting engine tests
+# ------------------------------------------------------------------ #
+
+# 20. End-to-end backtest on a 1-year H1 window (keeps M1 load tractable).
+h1_win = dm.load("EURUSD", "H1", start="2023-01-01", end="2023-12-31")
+sig_win = strat.generate(h1_win)
+engine = BacktestEngine(
+    symbol="EURUSD",
+    timeframe="H1",
+    risk_pct=0.01,
+    initial_capital=10_000.0,
+    strategy_name="1",
+)
+result = engine.run(sig_win, h1_win)
+print(f"Backtest: {result.metrics['n_trades']} trades, "
+      f"return {result.metrics['total_return_pct']:.2f}%, "
+      f"final equity ${result.metrics['final_equity']:.2f}")
+
+# 21. Result shape
+assert isinstance(result, BacktestResult)
+assert isinstance(result.metrics, dict)
+assert isinstance(result.equity_curve, pd.Series)
+assert len(result.equity_curve) > 0
+assert result.metrics["n_trades"] > 0
+assert result.metrics["final_equity"] > 0
+
+# 22. Equity curve is daily and monotonic in time
+assert result.equity_curve.index.is_monotonic_increasing
+assert (result.equity_curve.index.to_series().diff().dropna() >= pd.Timedelta("1D")).all()
+
+# 23. Save the equity curve PNG
+png_path = result.save_equity_curve()
+print(f"Saved equity curve: {png_path}")
+assert png_path.exists()
+assert png_path.suffix == ".png"
+
+print("Backtesting engine tests passed.")
 
 print("\nAll smoke tests passed.")
