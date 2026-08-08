@@ -184,7 +184,7 @@ sig_win = strat.generate(h1_win)
 engine = BacktestEngine(
     symbol="EURUSD",
     timeframe="H1",
-    risk_pct=0.01,
+    risk_money=100.0,
     initial_capital=10_000.0,
     strategy_name="1",
 )

@@ -39,6 +39,10 @@ class StrategySignals:
     - short_entries/short_exits: booleans. True -> enter short / exit to flat.
     - sl_stop/tp_stop: floats, NaN except bars while a position is open.
       A fixed stop keeps its entry value; a trailing stop rewrites each bar.
+    - sl_is_distance: if True, sl_stop holds the SL DISTANCE (e.g. sl_atr *
+      ATR) rather than an absolute price. The engine converts the distance
+      to an absolute stop relative to the entry fill price (ask for longs,
+      bid for shorts), matching the MQL5 engine's SL placement.
 
     Long and short are exclusive: entries and short_entries must never both
     be True at the same bar. Exit + opposite entry on the same bar is a
@@ -51,6 +55,7 @@ class StrategySignals:
     short_exits: pd.Series
     sl_stop: pd.Series
     tp_stop: pd.Series
+    sl_is_distance: bool = False
 
     def validate(self, df: pd.DataFrame) -> None:
         """Verify all series align with df and are internally consistent.
@@ -62,6 +67,8 @@ class StrategySignals:
         """
         index = df.index
         for f in fields(self):
+            if f.name == "sl_is_distance":
+                continue  # scalar flag, not a series
             s = getattr(self, f.name)
             if not isinstance(s, pd.Series):
                 raise TypeError(
@@ -81,6 +88,11 @@ class StrategySignals:
             s = getattr(self, name)
             if not pd.api.types.is_numeric_dtype(s):
                 raise ValueError(f"{name} must be numeric, got {s.dtype}")
+
+        if not isinstance(self.sl_is_distance, bool):
+            raise ValueError(
+                f"sl_is_distance must be bool, got {type(self.sl_is_distance).__name__}"
+            )
 
         # Cannot enter both directions at the same bar.
         both_entry = self.entries & self.short_entries

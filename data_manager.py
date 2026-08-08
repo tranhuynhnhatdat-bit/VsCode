@@ -17,6 +17,12 @@ Design decisions (from grilling session):
 - Empty DataFrame on empty result
 - force_recompute=True param
 - Ignore timezone (naive datetime)
+
+Data format (MQL5 export, fixed spread, no header):
+- 9 columns: Date,Time,Open,High,Low,Close,Volume,RealVolume,Spread
+- Spread is in points and constant per symbol (e.g. XAUUSD=30, EURUSD=15)
+- The Spread column is carried through resampling so the engine can apply
+  the per-bar spread to entry fills (matching the MQL5 engine).
 """
 
 from __future__ import annotations
@@ -32,31 +38,33 @@ RESAMPLED_DIR = DATA_DIR / "resampled"
 
 # Hardcoded symbol -> filename mapping. Covers all 13 files in Data/.
 SYMBOLS: dict[str, str] = {
-    "AUDUSD": "2026.8.3AUDUSD_ftmo-M1-Forex_245.csv",
-    "EURUSD": "2026.8.3EURUSD_ftmo-M1-Forex_245.csv",
-    "GBPUSD": "2026.8.3GBPUSD_ftmo-M1-Forex_245.csv",
-    "NZDUSD": "2026.8.3NZDUSD_ftmo-M1-Forex_245.csv",
-    "USA30IDXUSD": "2026.8.3USA30IDXUSD_ftmo-M1-Forex_245.csv",
-    "USA500IDXUSD": "2026.8.3USA500IDXUSD_ftmo-M1-Forex_245.csv",
-    "USATECHIDXUSD": "2026.8.3USATECHIDXUSD_ftmo-M1-Forex_245.csv",
-    "USDCAD": "2026.8.3USDCAD_ftmo-M1-Forex_245.csv",
-    "USDCHF": "2026.8.3USDCHF_ftmo-M1-Forex_245.csv",
-    "USDJPY": "2026.8.3USDJPY_ftmo-M1-Forex_245.csv",
-    "USSC2000IDXUSD": "2026.8.3USSC2000IDXUSD_ftmo-M1-Forex_245.csv",
-    "XAGUSD": "2026.8.3XAGUSD_ftmo-M1-Forex_245.csv",
-    "XAUUSD": "2026.8.3XAUUSD_ftmo-M1-Forex_245.csv",
+    "AUDUSD": "AUDUSD_ftmo.csv",
+    "EURUSD": "EURUSD_ftmo.csv",
+    "GBPUSD": "GBPUSD_ftmo.csv",
+    "NZDUSD": "NZDUSD_ftmo.csv",
+    "USA30IDXUSD": "USA30IDXUSD_ftmo.csv",
+    "USA500IDXUSD": "USA500IDXUSD_ftmo.csv",
+    "USATECHIDXUSD": "USATECHIDXUSD_ftmo.csv",
+    "USDCAD": "USDCAD_ftmo.csv",
+    "USDCHF": "USDCHF_ftmo.csv",
+    "USDJPY": "USDJPY_ftmo.csv",
+    "USSC2000IDXUSD": "USSC2000IDXUSD_ftmo.csv",
+    "XAGUSD": "XAGUSD_ftmo.csv",
+    "XAUUSD": "XAUUSD_ftmo.csv",
 }
 
 # Supported timeframes. M1 is the source; the rest are resampled from it.
 TIMEFRAMES: set[str] = {"M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"}
 
 # Resampling rule: Open=first, High=max, Low=min, Close=last, Volume=sum.
+# Spread is constant per symbol, so "first" is correct.
 RESAMPLE_RULE = {
     "Open": "first",
     "High": "max",
     "Low": "min",
     "Close": "last",
     "Volume": "sum",
+    "Spread": "first",
 }
 
 # pandas offset alias for each timeframe.
@@ -73,7 +81,20 @@ _TIMEFRAME_OFFSET = {
 }
 
 # Columns of the output DataFrame (DateTime is the index).
-OUTPUT_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+OUTPUT_COLUMNS = ["Open", "High", "Low", "Close", "Volume", "Spread"]
+
+# Raw CSV column names (no header in the MQL5 export).
+_RAW_COLUMNS = [
+    "Date",
+    "Time",
+    "Open",
+    "High",
+    "Low",
+    "Close",
+    "Volume",
+    "RealVolume",
+    "Spread",
+]
 
 
 class DataManager:
@@ -111,7 +132,8 @@ class DataManager:
 
         Returns:
             A DataFrame indexed by DateTime with columns
-            Open, High, Low, Close, Volume. Empty DataFrame if no rows match.
+            Open, High, Low, Close, Volume, Spread. Empty DataFrame if no
+            rows match.
         """
         self._validate(symbol, timeframe)
 
@@ -165,9 +187,23 @@ class DataManager:
 
         df = pd.read_csv(
             path,
-            parse_dates=["DateTime"],
-            dtype={"Open": float, "High": float, "Low": float, "Close": float},
+            header=None,
+            names=_RAW_COLUMNS,
+            dtype={
+                "Open": float,
+                "High": float,
+                "Low": float,
+                "Close": float,
+                "Volume": float,
+                "RealVolume": float,
+                "Spread": float,
+            },
         )
+        # Combine Date + Time into a single DateTime index.
+        df["DateTime"] = pd.to_datetime(
+            df["Date"] + " " + df["Time"], format="%Y.%m.%d %H:%M"
+        )
+        df = df.drop(columns=["Date", "Time", "RealVolume"])
         df = df.set_index("DateTime").sort_index()
         self._m1_cache[symbol] = df
         return df

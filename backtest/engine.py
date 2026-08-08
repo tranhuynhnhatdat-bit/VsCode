@@ -2,9 +2,18 @@
 
 Design (from grilling session):
 - Thin wrapper around vectorbt Portfolio.from_signals()
-- Entries/exits fill at the next M1 bar open after the HTF close (no lookahead)
+- Entries/exits fill at the M1 bar open at/after the HTF actionable time
+  (the first tick of the target M1 bar, matching the MQL5 engine)
+- Long entries fill at ASK (open + spread); exits fill at BID (open).
+  The spread is charged as a fixed fee on entry using the per-bar Spread
+  column from the data (fixed spread, MQL5 export format).
 - SL-first on simultaneous SL/TP hit; gap-through-SL fills at the worse price
-- Risk % of initial equity -> lot per entry (fixed-fractional, no compounding)
+- Fixed risk money per trade -> lot per entry (matches MQL5 RiskToLots:
+  lots = riskMoney / (stopDistance * tickValue/tickSize), rounded down to
+  volume_step, rejected if outside [volume_min, volume_max])
+- SL can be expressed as an absolute price or as a DISTANCE (sl_is_distance).
+  Distance-based SL is converted to an absolute stop relative to the entry
+  fill price (ask for longs, bid for shorts), matching the MQL5 engine.
 - All costs: spread (fixed_fees on entry), swap (post-processed per day held,
   Wed 3-day rule), commission (hardcoded 0)
 - Daily equity curve; matplotlib PNG save
@@ -30,6 +39,13 @@ RESULTS_DIR = Path(r"C:\Users\DAT\Desktop\VsCode\results")
 
 # Commission is modeled but set to 0 for now (FTMO default).
 COMMISSION = 0.0
+
+# Cash ceiling passed to vectorbt so position sizes are never reduced by
+# available cash. The MQL5 engine sizes positions purely from risk money
+# (margin is a separate concern), so the backtest must not let cash cap
+# the lot size. The equity curve is shifted back to start at
+# initial_capital after the run.
+_CASH_CEILING = 1e15
 
 # HTF timeframe -> pandas offset. The HTF bar timestamp is the bar's OPEN
 # time; a signal computed from that bar's close is only known one period
@@ -89,13 +105,13 @@ class BacktestEngine:
         self,
         symbol: str,
         timeframe: str,
-        risk_pct: float = 0.01,
+        risk_money: float = 100.0,
         initial_capital: float = 10_000.0,
         strategy_name: str = "1",
     ) -> None:
         self.symbol = symbol
         self.timeframe = timeframe
-        self.risk_pct = risk_pct
+        self.risk_money = risk_money
         self.initial_capital = initial_capital
         self.strategy_name = strategy_name
 
@@ -132,24 +148,35 @@ class BacktestEngine:
         volume_step = float(info["volume_step"])
         volume_min = float(info["volume_min"])
         volume_max = float(info["volume_max"])
-        spread = float(info["spread"])
         swap_long = float(info["swap_long"])
         swap_short = float(info["swap_short"])
         swap_rollover3days = int(info["swap_rollover3days"])
+
+        # Per-bar spread (points) from the data; fall back to symbol_info.
+        spread_points = self._spread_series(m1, info)
 
         # 4. Map HTF signals to M1.
         m1_entries, m1_exits, m1_s_entries, m1_s_exits = self._map_signals(
             signals, m1.index
         )
-        m1_sl = self._map_stops(signals.sl_stop, m1.index)
+
+        # 5. Resolve SL: absolute prices for vectorbt + distances for sizing.
+        m1_sl_abs, m1_sl_dist = self._resolve_sl(
+            signals,
+            m1_entries,
+            m1_s_entries,
+            m1["Open"],
+            spread_points,
+            tick_size,
+            m1.index,
+        )
         m1_tp = self._map_stops(signals.tp_stop, m1.index)
 
-        # 5. Compute per-entry lot sizes (risk % of initial equity).
+        # 6. Compute per-entry lot sizes (fixed risk money per trade).
         m1_size = self._compute_sizes(
             m1_entries,
             m1_s_entries,
-            m1_sl,
-            m1["Open"],
+            m1_sl_dist,
             tick_value,
             tick_size,
             volume_step,
@@ -157,23 +184,27 @@ class BacktestEngine:
             volume_max,
         )
 
-        # 6. Scale prices so vectorbt PnL = real forex PnL in deposit currency.
+        # 7. Scale prices so vectorbt PnL = real forex PnL in deposit currency.
         scale = tick_value / tick_size
         close = m1["Close"] * scale
         open_ = m1["Open"] * scale
         high = m1["High"] * scale
         low = m1["Low"] * scale
-        sl_scaled = m1_sl * scale
+        sl_scaled = m1_sl_abs * scale
         tp_scaled = m1_tp * scale
 
-        # Spread as a fixed fee on entry (one spread per round trip).
-        # spread is in points; fee = spread_points * tick_size * scale * size
-        # = spread_points * tick_value * size (tick_size cancels).
+        # Spread as a fixed fee on entry (buy at ask = bid + spread).
+        # fee = spread_points * tick_value * size (tick_size cancels).
         fixed_fees = pd.Series(0.0, index=m1.index)
         entry_bars = m1_entries | m1_s_entries
-        fixed_fees.loc[entry_bars] = spread * tick_value * m1_size.loc[entry_bars]
+        fixed_fees.loc[entry_bars] = (
+            spread_points.loc[entry_bars] * tick_value * m1_size.loc[entry_bars]
+        )
 
-        # 7. Run vectorbt.
+        # 8. Run vectorbt. init_cash is a huge ceiling so vectorbt never
+        #    reduces the position size to fit cash (MQL5 sizes purely from
+        #    risk money). The equity curve is shifted back to start at
+        #    initial_capital below.
         import vectorbt as vb
 
         pf = vb.Portfolio.from_signals(
@@ -183,29 +214,34 @@ class BacktestEngine:
             short_entries=m1_s_entries,
             short_exits=m1_s_exits,
             size=m1_size,
+            price=open_,
             open=open_,
             high=high,
             low=low,
             sl_stop=sl_scaled,
             tp_stop=tp_scaled,
             fixed_fees=fixed_fees,
-            init_cash=self.initial_capital,
+            init_cash=_CASH_CEILING,
             lock_cash=False,
             accumulate=False,
             upon_opposite_entry="ignore",
             freq="1min",
         )
 
-        # 8. Post-process swap and build equity curve.
+        # 9. Post-process swap and build equity curve.
         trades = pf.trades.records
         m1_equity = pf.value()
         swap_series = self._compute_swap(
             trades, m1.index, swap_long, swap_short, swap_rollover3days
         )
-        m1_equity_adj = m1_equity - swap_series.cumsum()
+        # Shift the curve from the cash ceiling back to initial_capital.
+        m1_equity_adj = (
+            m1_equity - (_CASH_CEILING - self.initial_capital)
+            - swap_series.cumsum()
+        )
         daily_equity = m1_equity_adj.resample("D").last().dropna()
 
-        # 9. Compute metrics.
+        # 10. Compute metrics.
         metrics = self._compute_metrics(
             daily_equity, trades, m1.index, m1_equity_adj
         )
@@ -234,10 +270,12 @@ class BacktestEngine:
         volume_step = float(info["volume_step"])
         volume_min = float(info["volume_min"])
         volume_max = float(info["volume_max"])
-        spread = float(info["spread"])
         swap_long = float(info["swap_long"])
         swap_short = float(info["swap_short"])
         swap_rollover3days = int(info["swap_rollover3days"])
+
+        # Per-bar spread (points) from the data; fall back to symbol_info.
+        spread_points = self._spread_series(htf_df, info)
 
         # Fill at the next HTF bar open (no lookahead).
         entries = signals.entries.shift(1).fillna(False).astype(bool)
@@ -245,12 +283,16 @@ class BacktestEngine:
         s_entries = signals.short_entries.shift(1).fillna(False).astype(bool)
         s_exits = signals.short_exits.shift(1).fillna(False).astype(bool)
 
-        # Per-entry lot sizes (risk % of initial equity).
+        # Resolve SL: absolute prices for vectorbt + distances for sizing.
+        sl_abs, sl_dist = self._resolve_sl_htf(
+            signals, entries, s_entries, htf_df["Open"], spread_points, tick_size
+        )
+
+        # Per-entry lot sizes (fixed risk money per trade).
         size = self._compute_sizes(
             entries,
             s_entries,
-            signals.sl_stop,
-            htf_df["Open"],
+            sl_dist,
             tick_value,
             tick_size,
             volume_step,
@@ -264,15 +306,18 @@ class BacktestEngine:
         open_ = htf_df["Open"] * scale
         high = htf_df["High"] * scale
         low = htf_df["Low"] * scale
-        sl_scaled = signals.sl_stop * scale
+        sl_scaled = sl_abs * scale
         tp_scaled = signals.tp_stop * scale
 
         # Spread as a fixed fee on entry.
         fixed_fees = pd.Series(0.0, index=htf_df.index)
         entry_bars = entries | s_entries
-        fixed_fees.loc[entry_bars] = spread * tick_value * size.loc[entry_bars]
+        fixed_fees.loc[entry_bars] = (
+            spread_points.loc[entry_bars] * tick_value * size.loc[entry_bars]
+        )
 
-        # Run vectorbt on the HTF bars directly.
+        # Run vectorbt on the HTF bars directly. init_cash is a huge
+        # ceiling so position sizes are never reduced by cash.
         import vectorbt as vb
 
         pf = vb.Portfolio.from_signals(
@@ -282,13 +327,14 @@ class BacktestEngine:
             short_entries=s_entries,
             short_exits=s_exits,
             size=size,
+            price=open_,
             open=open_,
             high=high,
             low=low,
             sl_stop=sl_scaled,
             tp_stop=tp_scaled,
             fixed_fees=fixed_fees,
-            init_cash=self.initial_capital,
+            init_cash=_CASH_CEILING,
             lock_cash=False,
             accumulate=False,
             upon_opposite_entry="ignore",
@@ -301,7 +347,11 @@ class BacktestEngine:
         swap_series = self._compute_swap(
             trades, htf_df.index, swap_long, swap_short, swap_rollover3days
         )
-        htf_equity_adj = htf_equity - swap_series.cumsum()
+        # Shift the curve from the cash ceiling back to initial_capital.
+        htf_equity_adj = (
+            htf_equity - (_CASH_CEILING - self.initial_capital)
+            - swap_series.cumsum()
+        )
         daily_equity = htf_equity_adj.resample("D").last().dropna()
 
         metrics = self._compute_metrics(
@@ -323,12 +373,12 @@ class BacktestEngine:
     def _map_signals(
         self, signals: StrategySignals, m1_index: pd.DatetimeIndex
     ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
-        """Map HTF entry/exit signals to the first M1 bar strictly after each.
+        """Map HTF entry/exit signals to the M1 bar at/after each actionable time.
 
         The HTF bar timestamp is the bar's OPEN time. A signal at HTF time T
         is computed from that bar's close, known at T + htf_period. The fill
-        is the first M1 bar strictly after T + htf_period (the next M1 open
-        after the signal becomes known) — no lookahead.
+        is the first M1 bar at or after T + htf_period — the first tick of
+        the target M1 bar, matching the MQL5 engine's fill timing.
         """
         period = pd.Timedelta(_HTF_OFFSET[self.timeframe])
         n = len(m1_index)
@@ -346,7 +396,7 @@ class BacktestEngine:
             sig_series = getattr(signals, name)
             for t in sig_series[sig_series].index:
                 actionable = t + period
-                pos = m1_index.searchsorted(actionable, side="right")
+                pos = m1_index.searchsorted(actionable, side="left")
                 if pos < n:
                     target.iloc[pos] = True
         return entries, exits, s_entries, s_exits
@@ -364,49 +414,129 @@ class BacktestEngine:
         return htf_stops.reindex(m1_index, method="ffill")
 
     # ------------------------------------------------------------------ #
+    # SL resolution (absolute prices vs distances)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _spread_series(df: pd.DataFrame, info: dict) -> pd.Series:
+        """Per-bar spread in points from the data; fall back to symbol_info."""
+        if "Spread" in df.columns:
+            return df["Spread"].astype(float)
+        return pd.Series(float(info["spread"]), index=df.index)
+
+    def _resolve_sl(
+        self,
+        signals: StrategySignals,
+        m1_entries: pd.Series,
+        m1_s_entries: pd.Series,
+        m1_open: pd.Series,
+        spread_points: pd.Series,
+        tick_size: float,
+        m1_index: pd.DatetimeIndex,
+    ) -> tuple[pd.Series, pd.Series]:
+        """Resolve SL into (absolute prices for vectorbt, distances for sizing).
+
+        Distance-based SL (sl_is_distance=True) is converted to an absolute
+        stop relative to the entry fill price:
+          - Long:  fill at ASK = open + spread; SL = ask - distance
+          - Short: fill at BID = open;          SL = bid + distance
+        This matches the MQL5 engine's SL placement (sl = ask - sl_atr*ATR).
+        """
+        if signals.sl_is_distance:
+            m1_sl_dist = self._map_stops(signals.sl_stop, m1_index)
+            spread_price = spread_points * tick_size
+            m1_sl_abs = pd.Series(np.nan, index=m1_index)
+
+            long_bars = m1_entries & m1_sl_dist.notna()
+            m1_sl_abs.loc[long_bars] = (
+                m1_open.loc[long_bars]
+                + spread_price.loc[long_bars]
+                - m1_sl_dist.loc[long_bars]
+            )
+            short_bars = m1_s_entries & m1_sl_dist.notna()
+            m1_sl_abs.loc[short_bars] = (
+                m1_open.loc[short_bars] + m1_sl_dist.loc[short_bars]
+            )
+            return m1_sl_abs.ffill(), m1_sl_dist
+
+        m1_sl_abs = self._map_stops(signals.sl_stop, m1_index)
+        m1_sl_dist = pd.Series(np.nan, index=m1_index)
+        long_bars = m1_entries & m1_sl_abs.notna()
+        m1_sl_dist.loc[long_bars] = m1_open.loc[long_bars] - m1_sl_abs.loc[long_bars]
+        short_bars = m1_s_entries & m1_sl_abs.notna()
+        m1_sl_dist.loc[short_bars] = m1_sl_abs.loc[short_bars] - m1_open.loc[short_bars]
+        return m1_sl_abs, m1_sl_dist
+
+    def _resolve_sl_htf(
+        self,
+        signals: StrategySignals,
+        entries: pd.Series,
+        s_entries: pd.Series,
+        open_: pd.Series,
+        spread_points: pd.Series,
+        tick_size: float,
+    ) -> tuple[pd.Series, pd.Series]:
+        """Resolve SL on the strategy's native timeframe (fill = next bar open)."""
+        if signals.sl_is_distance:
+            # The distance at the fill bar equals the distance at the signal
+            # bar (fixed while held, so shift(1) is a no-op for the value).
+            sl_dist = signals.sl_stop
+            spread_price = spread_points * tick_size
+            sl_abs = pd.Series(np.nan, index=open_.index)
+
+            long_bars = entries & sl_dist.notna()
+            sl_abs.loc[long_bars] = (
+                open_.loc[long_bars]
+                + spread_price.loc[long_bars]
+                - sl_dist.loc[long_bars]
+            )
+            short_bars = s_entries & sl_dist.notna()
+            sl_abs.loc[short_bars] = (
+                open_.loc[short_bars] + sl_dist.loc[short_bars]
+            )
+            return sl_abs.ffill(), sl_dist
+
+        sl_abs = signals.sl_stop
+        sl_dist = pd.Series(np.nan, index=open_.index)
+        long_bars = entries & sl_abs.notna()
+        sl_dist.loc[long_bars] = open_.loc[long_bars] - sl_abs.loc[long_bars]
+        short_bars = s_entries & sl_abs.notna()
+        sl_dist.loc[short_bars] = sl_abs.loc[short_bars] - open_.loc[short_bars]
+        return sl_abs, sl_dist
+
+    # ------------------------------------------------------------------ #
     # Lot sizing
     # ------------------------------------------------------------------ #
     def _compute_sizes(
         self,
         m1_entries: pd.Series,
         m1_s_entries: pd.Series,
-        m1_sl: pd.Series,
-        m1_open: pd.Series,
+        m1_sl_dist: pd.Series,
         tick_value: float,
         tick_size: float,
         volume_step: float,
         volume_min: float,
         volume_max: float,
     ) -> pd.Series:
-        """Lot per entry = risk$ / (SL distance in dollars per lot).
+        """Lot per entry = risk_money / (SL distance in dollars per lot).
 
-        Rounded down to volume_step, clamped to [volume_min, volume_max].
-        Entries with an invalid SL distance or a sub-minimum lot are skipped
-        (size 0).
+        Matches MQL5 RiskToLots:
+        - lots = risk_money / (stopDistance * tickValue/tickSize)
+        - rounded down to volume_step
+        - REJECTED (size 0) if outside [volume_min, volume_max]
         """
-        risk_dollars = self.risk_pct * self.initial_capital
         size = pd.Series(np.nan, index=m1_entries.index)
 
-        # Long entries: SL below entry -> sl_dist = open - sl.
-        long_bars = m1_entries & m1_sl.notna()
-        long_dist = m1_open.loc[long_bars] - m1_sl.loc[long_bars]
-        long_dist = long_dist[long_dist > 0]
-        if len(long_dist):
-            lots = risk_dollars / (long_dist / tick_size * tick_value)
-            size.loc[long_dist.index] = lots
+        entry_bars = (m1_entries | m1_s_entries) & m1_sl_dist.notna()
+        dist = m1_sl_dist.loc[entry_bars]
+        dist = dist[dist > 0]
+        if len(dist):
+            lots = self.risk_money / (dist * tick_value / tick_size)
+            size.loc[dist.index] = lots
 
-        # Short entries: SL above entry -> sl_dist = sl - open.
-        short_bars = m1_s_entries & m1_sl.notna()
-        short_dist = m1_sl.loc[short_bars] - m1_open.loc[short_bars]
-        short_dist = short_dist[short_dist > 0]
-        if len(short_dist):
-            lots = risk_dollars / (short_dist / tick_size * tick_value)
-            size.loc[short_dist.index] = lots
-
-        # Round down to volume_step, clamp, drop sub-minimum.
-        size = (size // volume_step) * volume_step
-        size = size.clip(lower=volume_min, upper=volume_max)
-        size = size.where(size >= volume_min, 0.0)
+        # Round down to volume_step (epsilon avoids float floor artifacts).
+        size = np.floor(size / volume_step + 1e-9) * volume_step
+        # Reject if outside [min, max] (MQL5 returns 0, never clamps).
+        size = size.where((size >= volume_min) & (size <= volume_max), 0.0)
         return size.fillna(0.0)
 
     # ------------------------------------------------------------------ #

@@ -120,11 +120,13 @@ class GoldSession(Strategy):
             - exits.astype(int).cumsum().shift(1).fillna(0)
         ) > 0
 
-        # Fixed ATR stop, set at entry, carried while held. No TP.
+        # Fixed ATR stop DISTANCE, set at entry, carried while held. No TP.
+        # The engine converts the distance to an absolute SL relative to the
+        # entry ASK price (matching the MQL5 engine: sl = ask - sl_atr*ATR).
         entry_sl = pd.Series(np.nan, index=df.index)
         long_entry = held & ~held.shift(1).fillna(False)
         entry_sl.loc[long_entry] = (
-            df["Close"].loc[long_entry] - self.sl_atr * atr.loc[long_entry]
+            self.sl_atr * atr.loc[long_entry]
         )
         sl_stop = entry_sl.ffill().where(held)
         tp_stop = pd.Series(np.nan, index=df.index)
@@ -136,6 +138,7 @@ class GoldSession(Strategy):
             short_exits=pd.Series(False, index=df.index),
             sl_stop=sl_stop,
             tp_stop=tp_stop,
+            sl_is_distance=True,
         )
         signals.validate(df)
         return signals

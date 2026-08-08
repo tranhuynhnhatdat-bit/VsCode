@@ -136,7 +136,7 @@ def _worker_init(payload: dict[str, Any]) -> None:
     _worker_state["engine"] = BacktestEngine(
         symbol=payload["symbol"],
         timeframe=payload["timeframe"],
-        risk_pct=payload["risk_pct"],
+        risk_money=payload["risk_money"],
         initial_capital=payload["initial_capital"],
         strategy_name=payload["strategy_name"],
     )
@@ -217,7 +217,7 @@ class TestEngine:
         split: tuple[float, float, float] = (0.30, 0.50, 0.20),
         constraints: list[tuple[str, str, str]] | None = None,
         initial_capital: float = 10_000.0,
-        risk_pct: float = 0.01,
+        risk_money: float = 100.0,
         strategy_name: str = "optimized",
         ga_config: GAConfig | None = None,
         fitness_criterion: str = "pf",
@@ -236,7 +236,7 @@ class TestEngine:
         self.split = tuple(split)
         self.constraints = constraints
         self.initial_capital = initial_capital
-        self.risk_pct = risk_pct
+        self.risk_money = risk_money
         self.strategy_name = strategy_name
         self.ga_config = ga_config or GAConfig()
         self.results_dir = Path(results_dir)
@@ -297,7 +297,7 @@ class TestEngine:
         self._engine = BacktestEngine(
             symbol=self.symbol,
             timeframe=self.timeframe,
-            risk_pct=self.risk_pct,
+            risk_money=self.risk_money,
             initial_capital=self.initial_capital,
             strategy_name=self.strategy_name,
         )
@@ -593,7 +593,7 @@ class TestEngine:
             payload = {
                 "symbol": self.symbol,
                 "timeframe": self.timeframe,
-                "risk_pct": self.risk_pct,
+                "risk_money": self.risk_money,
                 "initial_capital": self.initial_capital,
                 "strategy_name": self.strategy_name,
                 "strategy_class": self.strategy_class,

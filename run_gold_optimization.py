@@ -106,6 +106,8 @@ def main() -> None:
         results_dir=RESULTS_DIR,
         start=START,
         end=END,
+        # Fixed risk money per trade (matches MQL5 InpRiskMoney).
+        risk_money=100.0,
         # H1 train backtests are fast (~1-2s each), so a real GA is tractable.
         ga_config=GAConfig(
             population=50,
