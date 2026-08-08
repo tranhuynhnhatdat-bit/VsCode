@@ -1,0 +1,431 @@
+{
+  "strategy": "GoldSession",
+  "symbol": "XAUUSD",
+  "timeframe": "H1",
+  "split": [
+    0.3,
+    0.5,
+    0.2
+  ],
+  "start": "2003-05-05",
+  "end": "2026-07-31",
+  "n_evaluations": 300,
+  "best_fitness": 2.7770407507391828,
+  "n_passing": 9,
+  "passing_strategies": [
+    {
+      "params": {
+        "sl_atr": 5.0,
+        "adx_period": 16,
+        "adx_threshold": 15,
+        "volume_lookback": 35,
+        "volume_mult": 1.3,
+        "regime_lookback": 10,
+        "use_volume_filter": false,
+        "use_trend_filter": true,
+        "use_regime_filter": true
+      },
+      "htf_train": {
+        "n_trades": 484,
+        "profit_factor": 1.19158449948105,
+        "win_rate": 53.51239669421488,
+        "trades_per_month": 3.4714797360980207,
+        "avg_trade_pct": 0.008868382084690101,
+        "total_return_pct": 17.129800000000092
+      },
+      "m1_train": {
+        "n_trades": 484,
+        "profit_factor": 1.19158449948105,
+        "win_rate": 53.51239669421488,
+        "trades_per_month": 3.4714797360980207,
+        "avg_trade_pct": 0.008868382084690101,
+        "total_return_pct": 17.129800000000092
+      },
+      "m1_oos1": {
+        "n_trades": 292,
+        "profit_factor": 1.175307917294981,
+        "win_rate": 55.47945205479452,
+        "trades_per_month": 3.4911547525530247,
+        "avg_trade_pct": 0.0693420334414493,
+        "total_return_pct": 8.6609999999999
+      },
+      "m1_oos2": {
+        "n_trades": 146,
+        "profit_factor": 1.1044291513690982,
+        "win_rate": 50.0,
+        "trades_per_month": 2.6188803771361227,
+        "avg_trade_pct": 0.013369741660240192,
+        "total_return_pct": 2.5827
+      },
+      "equity_curve_png": "C:\\Users\\DAT\\Desktop\\VsCode\\results\\strategy_0\\equity_curve.png"
+    },
+    {
+      "params": {
+        "sl_atr": 1.0,
+        "adx_period": 18,
+        "adx_threshold": 15,
+        "volume_lookback": 45,
+        "volume_mult": 2.0,
+        "regime_lookback": 10,
+        "use_volume_filter": false,
+        "use_trend_filter": false,
+        "use_regime_filter": true
+      },
+      "htf_train": {
+        "n_trades": 531,
+        "profit_factor": 1.1399671785282715,
+        "win_rate": 53.672316384180796,
+        "trades_per_month": 3.8085862393967953,
+        "avg_trade_pct": -0.00036971707457625976,
+        "total_return_pct": 79.46470000000168
+      },
+      "m1_train": {
+        "n_trades": 531,
+        "profit_factor": 1.1399671785282715,
+        "win_rate": 53.672316384180796,
+        "trades_per_month": 3.8085862393967953,
+        "avg_trade_pct": -0.00036971707457625976,
+        "total_return_pct": 79.46470000000168
+      },
+      "m1_oos1": {
+        "n_trades": 322,
+        "profit_factor": 1.3455427220927771,
+        "win_rate": 56.2111801242236,
+        "trades_per_month": 3.8498350353495683,
+        "avg_trade_pct": 0.14345375695162654,
+        "total_return_pct": 99.47940000000018
+      },
+      "m1_oos2": {
+        "n_trades": 189,
+        "profit_factor": 1.1765089556783987,
+        "win_rate": 51.85185185185185,
+        "trades_per_month": 3.3901944608132,
+        "avg_trade_pct": -0.015476238619783152,
+        "total_return_pct": 32.284599999999905
+      },
+      "equity_curve_png": "C:\\Users\\DAT\\Desktop\\VsCode\\results\\strategy_1\\equity_curve.png"
+    },
+    {
+      "params": {
+        "sl_atr": 1.0,
+        "adx_period": 18,
+        "adx_threshold": 35,
+        "volume_lookback": 45,
+        "volume_mult": 1.5,
+        "regime_lookback": 10,
+        "use_volume_filter": false,
+        "use_trend_filter": false,
+        "use_regime_filter": true
+      },
+      "htf_train": {
+        "n_trades": 531,
+        "profit_factor": 1.1399671785282715,
+        "win_rate": 53.672316384180796,
+        "trades_per_month": 3.8085862393967953,
+        "avg_trade_pct": -0.00036971707457625976,
+        "total_return_pct": 79.46470000000168
+      },
+      "m1_train": {
+        "n_trades": 531,
+        "profit_factor": 1.1399671785282715,
+        "win_rate": 53.672316384180796,
+        "trades_per_month": 3.8085862393967953,
+        "avg_trade_pct": -0.00036971707457625976,
+        "total_return_pct": 79.46470000000168
+      },
+      "m1_oos1": {
+        "n_trades": 322,
+        "profit_factor": 1.3455427220927771,
+        "win_rate": 56.2111801242236,
+        "trades_per_month": 3.8498350353495683,
+        "avg_trade_pct": 0.14345375695162654,
+        "total_return_pct": 99.47940000000018
+      },
+      "m1_oos2": {
+        "n_trades": 189,
+        "profit_factor": 1.1765089556783987,
+        "win_rate": 51.85185185185185,
+        "trades_per_month": 3.3901944608132,
+        "avg_trade_pct": -0.015476238619783152,
+        "total_return_pct": 32.284599999999905
+      },
+      "equity_curve_png": "C:\\Users\\DAT\\Desktop\\VsCode\\results\\strategy_2\\equity_curve.png"
+    },
+    {
+      "params": {
+        "sl_atr": 3.0,
+        "adx_period": 28,
+        "adx_threshold": 15,
+        "volume_lookback": 30,
+        "volume_mult": 1.0,
+        "regime_lookback": 35,
+        "use_volume_filter": false,
+        "use_trend_filter": true,
+        "use_regime_filter": true
+      },
+      "htf_train": {
+        "n_trades": 614,
+        "profit_factor": 1.139706665667121,
+        "win_rate": 53.420195439739416,
+        "trades_per_month": 4.403901979264845,
+        "avg_trade_pct": 0.02654196806277167,
+        "total_return_pct": 28.326700000000393
+      },
+      "m1_train": {
+        "n_trades": 614,
+        "profit_factor": 1.139706665667121,
+        "win_rate": 53.420195439739416,
+        "trades_per_month": 4.403901979264845,
+        "avg_trade_pct": 0.02654196806277167,
+        "total_return_pct": 28.326700000000393
+      },
+      "m1_oos1": {
+        "n_trades": 416,
+        "profit_factor": 1.1239301748577097,
+        "win_rate": 51.92307692307693,
+        "trades_per_month": 4.973699921445405,
+        "avg_trade_pct": 0.041854714763556386,
+        "total_return_pct": 14.290499999999895
+      },
+      "m1_oos2": {
+        "n_trades": 205,
+        "profit_factor": 1.1080593891317931,
+        "win_rate": 51.707317073170735,
+        "trades_per_month": 3.6771950500883914,
+        "avg_trade_pct": 0.015484265089970204,
+        "total_return_pct": 7.930899999999901
+      },
+      "equity_curve_png": "C:\\Users\\DAT\\Desktop\\VsCode\\results\\strategy_3\\equity_curve.png"
+    },
+    {
+      "params": {
+        "sl_atr": 4.5,
+        "adx_period": 16,
+        "adx_threshold": 15,
+        "volume_lookback": 15,
+        "volume_mult": 1.8,
+        "regime_lookback": 40,
+        "use_volume_filter": false,
+        "use_trend_filter": true,
+        "use_regime_filter": true
+      },
+      "htf_train": {
+        "n_trades": 798,
+        "profit_factor": 1.1347974855232645,
+        "win_rate": 54.01002506265664,
+        "trades_per_month": 5.723638077285579,
+        "avg_trade_pct": 0.031258936396701166,
+        "total_return_pct": 23.61350000000027
+      },
+      "m1_train": {
+        "n_trades": 798,
+        "profit_factor": 1.1347974855232645,
+        "win_rate": 54.01002506265664,
+        "trades_per_month": 5.723638077285579,
+        "avg_trade_pct": 0.031258936396701166,
+        "total_return_pct": 23.61350000000027
+      },
+      "m1_oos1": {
+        "n_trades": 511,
+        "profit_factor": 1.182371954648026,
+        "win_rate": 53.42465753424658,
+        "trades_per_month": 6.109520816967793,
+        "avg_trade_pct": 0.05249363327664724,
+        "total_return_pct": 17.15790000000013
+      },
+      "m1_oos2": {
+        "n_trades": 261,
+        "profit_factor": 1.1031977226196865,
+        "win_rate": 49.808429118773944,
+        "trades_per_month": 4.681697112551562,
+        "avg_trade_pct": 0.013217308381062486,
+        "total_return_pct": 5.912600000000071
+      },
+      "equity_curve_png": "C:\\Users\\DAT\\Desktop\\VsCode\\results\\strategy_4\\equity_curve.png"
+    },
+    {
+      "params": {
+        "sl_atr": 5.0,
+        "adx_period": 28,
+        "adx_threshold": 30,
+        "volume_lookback": 45,
+        "volume_mult": 1.1,
+        "regime_lookback": 50,
+        "use_volume_filter": false,
+        "use_trend_filter": false,
+        "use_regime_filter": true
+      },
+      "htf_train": {
+        "n_trades": 830,
+        "profit_factor": 1.1237789602470247,
+        "win_rate": 54.21686746987952,
+        "trades_per_month": 5.9531573986804895,
+        "avg_trade_pct": 0.0277733628135124,
+        "total_return_pct": 20.396000000000168
+      },
+      "m1_train": {
+        "n_trades": 830,
+        "profit_factor": 1.1237789602470247,
+        "win_rate": 54.21686746987952,
+        "trades_per_month": 5.9531573986804895,
+        "avg_trade_pct": 0.0277733628135124,
+        "total_return_pct": 20.396000000000168
+      },
+      "m1_oos1": {
+        "n_trades": 558,
+        "profit_factor": 1.2143349611875223,
+        "win_rate": 53.94265232974911,
+        "trades_per_month": 6.671453260015712,
+        "avg_trade_pct": 0.08414262201437031,
+        "total_return_pct": 20.175799999999956
+      },
+      "m1_oos2": {
+        "n_trades": 263,
+        "profit_factor": 1.1192582677679486,
+        "win_rate": 50.19011406844106,
+        "trades_per_month": 4.717572186210961,
+        "avg_trade_pct": 0.02053513598630792,
+        "total_return_pct": 6.210100000000072
+      },
+      "equity_curve_png": "C:\\Users\\DAT\\Desktop\\VsCode\\results\\strategy_5\\equity_curve.png"
+    },
+    {
+      "params": {
+        "sl_atr": 5.0,
+        "adx_period": 28,
+        "adx_threshold": 35,
+        "volume_lookback": 45,
+        "volume_mult": 1.0,
+        "regime_lookback": 50,
+        "use_volume_filter": false,
+        "use_trend_filter": false,
+        "use_regime_filter": true
+      },
+      "htf_train": {
+        "n_trades": 830,
+        "profit_factor": 1.1237789602470247,
+        "win_rate": 54.21686746987952,
+        "trades_per_month": 5.9531573986804895,
+        "avg_trade_pct": 0.0277733628135124,
+        "total_return_pct": 20.396000000000168
+      },
+      "m1_train": {
+        "n_trades": 830,
+        "profit_factor": 1.1237789602470247,
+        "win_rate": 54.21686746987952,
+        "trades_per_month": 5.9531573986804895,
+        "avg_trade_pct": 0.0277733628135124,
+        "total_return_pct": 20.396000000000168
+      },
+      "m1_oos1": {
+        "n_trades": 558,
+        "profit_factor": 1.2143349611875223,
+        "win_rate": 53.94265232974911,
+        "trades_per_month": 6.671453260015712,
+        "avg_trade_pct": 0.08414262201437031,
+        "total_return_pct": 20.175799999999956
+      },
+      "m1_oos2": {
+        "n_trades": 263,
+        "profit_factor": 1.1192582677679486,
+        "win_rate": 50.19011406844106,
+        "trades_per_month": 4.717572186210961,
+        "avg_trade_pct": 0.02053513598630792,
+        "total_return_pct": 6.210100000000072
+      },
+      "equity_curve_png": "C:\\Users\\DAT\\Desktop\\VsCode\\results\\strategy_6\\equity_curve.png"
+    },
+    {
+      "params": {
+        "sl_atr": 5.0,
+        "adx_period": 16,
+        "adx_threshold": 35,
+        "volume_lookback": 25,
+        "volume_mult": 1.4,
+        "regime_lookback": 50,
+        "use_volume_filter": false,
+        "use_trend_filter": false,
+        "use_regime_filter": true
+      },
+      "htf_train": {
+        "n_trades": 830,
+        "profit_factor": 1.1237789602470247,
+        "win_rate": 54.21686746987952,
+        "trades_per_month": 5.9531573986804895,
+        "avg_trade_pct": 0.0277733628135124,
+        "total_return_pct": 20.396000000000168
+      },
+      "m1_train": {
+        "n_trades": 830,
+        "profit_factor": 1.1237789602470247,
+        "win_rate": 54.21686746987952,
+        "trades_per_month": 5.9531573986804895,
+        "avg_trade_pct": 0.0277733628135124,
+        "total_return_pct": 20.396000000000168
+      },
+      "m1_oos1": {
+        "n_trades": 558,
+        "profit_factor": 1.2143349611875223,
+        "win_rate": 53.94265232974911,
+        "trades_per_month": 6.671453260015712,
+        "avg_trade_pct": 0.08414262201437031,
+        "total_return_pct": 20.175799999999956
+      },
+      "m1_oos2": {
+        "n_trades": 263,
+        "profit_factor": 1.1192582677679486,
+        "win_rate": 50.19011406844106,
+        "trades_per_month": 4.717572186210961,
+        "avg_trade_pct": 0.02053513598630792,
+        "total_return_pct": 6.210100000000072
+      },
+      "equity_curve_png": "C:\\Users\\DAT\\Desktop\\VsCode\\results\\strategy_7\\equity_curve.png"
+    },
+    {
+      "params": {
+        "sl_atr": 3.0,
+        "adx_period": 18,
+        "adx_threshold": 15,
+        "volume_lookback": 30,
+        "volume_mult": 1.7,
+        "regime_lookback": 35,
+        "use_volume_filter": false,
+        "use_trend_filter": true,
+        "use_regime_filter": true
+      },
+      "htf_train": {
+        "n_trades": 748,
+        "profit_factor": 1.118457358646929,
+        "win_rate": 53.6096256684492,
+        "trades_per_month": 5.365014137606032,
+        "avg_trade_pct": 0.022390142402826208,
+        "total_return_pct": 30.1890000000003
+      },
+      "m1_train": {
+        "n_trades": 748,
+        "profit_factor": 1.118457358646929,
+        "win_rate": 53.6096256684492,
+        "trades_per_month": 5.365014137606032,
+        "avg_trade_pct": 0.022390142402826208,
+        "total_return_pct": 30.1890000000003
+      },
+      "m1_oos1": {
+        "n_trades": 468,
+        "profit_factor": 1.0840677203142424,
+        "win_rate": 52.13675213675214,
+        "trades_per_month": 5.59541241162608,
+        "avg_trade_pct": 0.03426756038085649,
+        "total_return_pct": 11.354799999999848
+      },
+      "m1_oos2": {
+        "n_trades": 257,
+        "profit_factor": 1.1515520581793672,
+        "win_rate": 51.36186770428015,
+        "trades_per_month": 4.609946965232764,
+        "avg_trade_pct": 0.01716419874104398,
+        "total_return_pct": 12.953699999999946
+      },
+      "equity_curve_png": "C:\\Users\\DAT\\Desktop\\VsCode\\results\\strategy_8\\equity_curve.png"
+    }
+  ]
+}

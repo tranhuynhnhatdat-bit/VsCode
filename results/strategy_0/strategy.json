@@ -1,0 +1,60 @@
+{
+  "params": {
+    "sl_atr": 5.0,
+    "adx_period": 16,
+    "adx_threshold": 15,
+    "volume_lookback": 35,
+    "volume_mult": 1.3,
+    "regime_lookback": 10,
+    "use_volume_filter": false,
+    "use_trend_filter": true,
+    "use_regime_filter": true
+  },
+  "htf_train": {
+    "n_trades": 484,
+    "profit_factor": 1.19158449948105,
+    "win_rate": 53.51239669421488,
+    "trades_per_month": 3.4714797360980207,
+    "avg_trade_pct": 0.008868382084690101,
+    "total_return_pct": 17.129800000000092
+  },
+  "m1_train": {
+    "n_trades": 484,
+    "profit_factor": 1.19158449948105,
+    "win_rate": 53.51239669421488,
+    "trades_per_month": 3.4714797360980207,
+    "avg_trade_pct": 0.008868382084690101,
+    "total_return_pct": 17.129800000000092
+  },
+  "m1_oos1": {
+    "n_trades": 292,
+    "profit_factor": 1.175307917294981,
+    "win_rate": 55.47945205479452,
+    "trades_per_month": 3.4911547525530247,
+    "avg_trade_pct": 0.0693420334414493,
+    "total_return_pct": 8.6609999999999
+  },
+  "m1_oos2": {
+    "n_trades": 146,
+    "profit_factor": 1.1044291513690982,
+    "win_rate": 50.0,
+    "trades_per_month": 2.6188803771361227,
+    "avg_trade_pct": 0.013369741660240192,
+    "total_return_pct": 2.5827
+  },
+  "full_run_metrics": {
+    "total_return_pct": 30.73440300000001,
+    "cagr": 0.011599049602789124,
+    "max_drawdown_pct": -8.432690198157704,
+    "sharpe": 0.3946478638484331,
+    "sortino": 0.2171341007407354,
+    "win_rate": 53.579175704989154,
+    "profit_factor": 1.1734880367942484,
+    "n_trades": 922,
+    "avg_trade_pct": 0.028733354638056693,
+    "exposure_pct": 15.067014735102461,
+    "final_equity": 13073.4403,
+    "start_date": "2003-05-05",
+    "end_date": "2026-07-31"
+  }
+}
