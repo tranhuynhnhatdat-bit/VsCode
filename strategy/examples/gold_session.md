@@ -58,13 +58,24 @@ signal is set on the **22:00 H1 bar** so the fill lands at **23:00 M1**.
 | `entry_hour`       | 1       | H1 bar whose close is known at 02:00 (fill hour)   |
 | `exit_hour`        | 22      | H1 bar whose close is known at 23:00 (fill hour)   |
 | `session_days`     | (2, 4)  | Weekdays: 2 = Wednesday, 4 = Friday                |
+| `use_volume_filter`| True    | Whether the volume filter gates the entry          |
+| `use_trend_filter` | True    | Whether the ADX trend filter gates the entry       |
+| `use_regime_filter`| True    | Whether the ATR regime filter gates the entry       |
 
 ## Optimization
 
 The genetic optimizer (`TestEngine`) sweeps `sl_atr`, `adx_period`,
-`adx_threshold`, `volume_lookback`, `volume_mult`, and
-`regime_lookback`. Entry/close times and session days are fixed.
+`adx_threshold`, `volume_lookback`, `volume_mult`, `regime_lookback`,
+and the three per-filter toggles `use_volume_filter`,
+`use_trend_filter`, and `use_regime_filter` — so the GA decides
+whether to use each filter (all off = a pure time-based session
+trade). Entry/close times and session days are fixed.
 
-Passing strategies are saved to `results/` as equity-curve PNGs plus a
-summary JSON (`*_optimization_summary.json`) containing each passing
-strategy's parameters and train/OOS1/OOS2 metrics.
+Each passing strategy is saved to its own folder under `results/`
+(`strategy_0/`, `strategy_1/`, …) containing:
+- `equity_curve.png` — full-data equity curve, train region shaded
+- `trades.csv` — full M1 trade records
+- `strategy.json` — params + train/OOS1/OOS2 metrics + full-run metrics
+
+A summary JSON (`*_optimization_summary.json`) and per-stage CSVs are
+also written to `results/`.

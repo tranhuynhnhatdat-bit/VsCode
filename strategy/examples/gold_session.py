@@ -41,6 +41,9 @@ class GoldSession(Strategy):
         entry_hour: int = 1,
         exit_hour: int = 22,
         session_days: tuple[int, ...] = (2, 4),
+        use_volume_filter: bool = True,
+        use_trend_filter: bool = True,
+        use_regime_filter: bool = True,
     ) -> None:
         self.sl_atr = sl_atr
         self.adx_period = adx_period
@@ -52,6 +55,9 @@ class GoldSession(Strategy):
         self.entry_hour = entry_hour
         self.exit_hour = exit_hour
         self.session_days = session_days
+        self.use_volume_filter = use_volume_filter
+        self.use_trend_filter = use_trend_filter
+        self.use_regime_filter = use_regime_filter
 
     def generate(self, df: pd.DataFrame) -> StrategySignals:
         require_ohlcv(df)
@@ -69,10 +75,17 @@ class GoldSession(Strategy):
             .transform(lambda s: s.rolling(self.volume_lookback).mean())
         )
 
-        # Filters (all evaluated at the entry bar).
-        volume_ok = df["Volume"] > self.volume_mult * vol_mean
-        trend_ok = adx > self.adx_threshold
-        regime_ok = atr > atr.rolling(self.regime_lookback).mean()
+        # Filters (all evaluated at the entry bar). Each can be toggled off
+        # so the optimizer can decide whether to use it (or trade unfiltered).
+        volume_ok = (not self.use_volume_filter) | (
+            df["Volume"] > self.volume_mult * vol_mean
+        )
+        trend_ok = (not self.use_trend_filter) | (
+            adx > self.adx_threshold
+        )
+        regime_ok = (not self.use_regime_filter) | (
+            atr > atr.rolling(self.regime_lookback).mean()
+        )
 
         # Entry: session day at the entry hour, all filters pass.
         is_session = pd.Series(

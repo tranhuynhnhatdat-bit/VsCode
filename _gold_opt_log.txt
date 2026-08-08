@@ -1,0 +1,15 @@
+Slicing verification passed: sliced-H1 train metrics match full-H1
+  GA gen 1/8 | best fitness 1.1019 | evals 20
+  GA gen 2/8 | best fitness 1.7878 | evals 40
+  GA gen 3/8 | best fitness 3.4190 | evals 60
+  GA gen 4/8 | best fitness 3.4190 | evals 80
+  GA gen 5/8 | best fitness 3.4190 | evals 100
+  GA gen 6/8 | best fitness 3.8737 | evals 120
+  GA gen 7/8 | best fitness 3.8737 | evals 140
+  GA gen 8/8 | best fitness 3.8737 | evals 160
+Optimization complete: 160 evals, 0 passing strategies (summary: C:\Users\DAT\Desktop\VsCode\results\gold_session_XAUUSD_H1_optimization_summary.json)
+Stage funnel: 106 unique -> 1 pass H1 -> 1 pass M1 confirm -> 0 pass M1 OOS
+Stage CSVs: [WindowsPath('C:/Users/DAT/Desktop/VsCode/results/gold_session_XAUUSD_H1_stage1_htf_train.csv'), WindowsPath('C:/Users/DAT/Desktop/VsCode/results/gold_session_XAUUSD_H1_stage2_m1_confirm.csv'), WindowsPath('C:/Users/DAT/Desktop/VsCode/results/gold_session_XAUUSD_H1_stage3_m1_oos.csv')]
+Passing strategies: 0
+Metrics CSV: C:\Users\DAT\Desktop\VsCode\results\gold_session_passing_metrics.csv
+Stage funnel: 106 unique -> 1 pass H1 -> 1 pass M1 confirm -> 0 pass M1 OOS

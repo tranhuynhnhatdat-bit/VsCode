@@ -50,6 +50,11 @@ PARAM_SPACE = {
     "volume_lookback": {"min": 10, "max": 50, "step": 5},
     "volume_mult": {"min": 1.0, "max": 2.0, "step": 0.1},
     "regime_lookback": {"min": 10, "max": 50, "step": 5},
+    # Per-filter on/off toggles: the GA decides whether to use each filter
+    # (all off = pure time-based session trade).
+    "use_volume_filter": [True, False],
+    "use_trend_filter": [True, False],
+    "use_regime_filter": [True, False],
 }
 
 
@@ -103,13 +108,13 @@ def main() -> None:
         end=END,
         # H1 train backtests are fast (~1-2s each), so a real GA is tractable.
         ga_config=GAConfig(
-            population=20,
-            generations=8,
+            population=50,
+            generations=20,
             tournament_k=3,
             elitism=2,
             mutation_rate=0.10,
             early_stop_generations=3,
-            seed=42,
+            seed=None,
             workers=6,
         ),
     )
@@ -136,6 +141,7 @@ def main() -> None:
         print(f"  m1_train:  {p.m1_train_metrics}")
         print(f"  m1_oos1:   {p.m1_oos1_metrics}")
         print(f"  m1_oos2:   {p.m1_oos2_metrics}")
+        print(f"  folder:    {p.equity_curve_png.parent}")
         print(f"  png:       {p.equity_curve_png}")
 
 

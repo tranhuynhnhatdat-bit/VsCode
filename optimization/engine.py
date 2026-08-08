@@ -380,10 +380,16 @@ class TestEngine:
                 stage_results.append(sr)
                 continue
 
-            # Full M1 run only for passing strategies (equity PNG).
+            # Full M1 run only for passing strategies (folder output).
             full_result = self._evaluate_m1_full(params)
-            png = self._save_png(
-                full_result.equity_curve, params, len(passing)
+            folder = self._save_strategy_folder(
+                full_result,
+                params,
+                len(passing),
+                htf_train,
+                m1_train,
+                m1_oos1,
+                m1_oos2,
             )
             sr.m1_oos_pass = True
             stage_results.append(sr)
@@ -394,7 +400,7 @@ class TestEngine:
                     m1_train_metrics=m1_train,
                     m1_oos1_metrics=m1_oos1,
                     m1_oos2_metrics=m1_oos2,
-                    equity_curve_png=png,
+                    equity_curve_png=folder / "equity_curve.png",
                 )
             )
 
@@ -718,24 +724,43 @@ class TestEngine:
     # ------------------------------------------------------------------ #
     # Outputs
     # ------------------------------------------------------------------ #
-    def _save_png(
-        self, equity_curve: pd.Series, params: dict[str, Any], index: int
+    def _save_strategy_folder(
+        self,
+        result: BacktestResult,
+        params: dict[str, Any],
+        index: int,
+        htf_train: dict[str, float],
+        m1_train: dict[str, float],
+        m1_oos1: dict[str, float],
+        m1_oos2: dict[str, float],
     ) -> Path:
-        """Full-data equity PNG with the train region shaded."""
+        """Write one folder per passing strategy.
+
+        Folder layout (results/strategy_<index>/):
+        - equity_curve.png  full-data equity curve, train region shaded
+        - trades.csv        full M1 trade records
+        - strategy.json     params + all stage metrics + full-run metrics
+        """
+        import csv
+        import json
+
         import matplotlib
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        self.results_dir.mkdir(parents=True, exist_ok=True)
-        path = self.results_dir / (
-            f"{self.strategy_name}_{self.symbol}_{self.timeframe}"
-            f"_pass{index}.png"
-        )
+        folder = self.results_dir / f"strategy_{index}"
+        folder.mkdir(parents=True, exist_ok=True)
 
+        # Equity curve PNG (train region shaded).
+        png_path = folder / "equity_curve.png"
         fig, ax = plt.subplots(figsize=(12, 6))
-        if len(equity_curve):
-            ax.plot(equity_curve.index, equity_curve.values, lw=1.2)
+        if len(result.equity_curve):
+            ax.plot(
+                result.equity_curve.index,
+                result.equity_curve.values,
+                lw=1.2,
+            )
         ax.axvspan(
             self._train_start,
             self._train_end,
@@ -752,9 +777,31 @@ class TestEngine:
         ax.grid(True, alpha=0.3)
         ax.legend(loc="best")
         fig.tight_layout()
-        fig.savefig(path, dpi=150)
+        fig.savefig(png_path, dpi=150)
         plt.close(fig)
-        return path
+
+        # Trade records CSV.
+        trades_path = folder / "trades.csv"
+        if result.trades is not None and not result.trades.empty:
+            result.trades.to_csv(trades_path, index=False)
+        else:
+            with open(trades_path, "w", newline="", encoding="utf-8") as f:
+                f.write("no_trades\n")
+
+        # Params + stage metrics + full-run metrics JSON.
+        strategy_path = folder / "strategy.json"
+        data = {
+            "params": self._jsonable(params),
+            "htf_train": self._jsonable(htf_train),
+            "m1_train": self._jsonable(m1_train),
+            "m1_oos1": self._jsonable(m1_oos1),
+            "m1_oos2": self._jsonable(m1_oos2),
+            "full_run_metrics": self._jsonable(result.metrics),
+        }
+        with open(strategy_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+        return folder
 
     @staticmethod
     def _jsonable(value: Any) -> Any:
