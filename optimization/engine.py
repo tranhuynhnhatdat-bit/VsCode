@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 import random
+import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -293,6 +294,8 @@ class TestEngine:
     # ------------------------------------------------------------------ #
     def optimize(self) -> OptimizationResult:
         """Run the 3-stage pipeline and save passing strategies."""
+        t_start = time.time()
+
         self._load_data()
         self._engine = BacktestEngine(
             symbol=self.symbol,
@@ -303,6 +306,8 @@ class TestEngine:
         )
         self._verify_slicing()
 
+        # Stage 1: GA on H1 train.
+        t0 = time.time()
         ga = GeneticOptimizer(
             param_space=ParamSpace(self.param_space),
             fitness_fn=self._fitness,
@@ -318,6 +323,7 @@ class TestEngine:
             if self._pool is not None:
                 self._pool.shutdown()
                 self._pool = None
+        t1 = time.time()
 
         # Rank unique evaluated individuals by fitness; run the stages.
         seen: dict[str, tuple[dict[str, Any], float]] = {}
@@ -326,8 +332,16 @@ class TestEngine:
             if key not in seen:
                 seen[key] = (rec.params, rec.fitness)
 
+        n_unique = len(seen)
+        print(f"=== Stage 1: GA (H1 train) ===")
+        print(f"  [TIMING] {t1-t0:.1f}s")
+        print(f"  [EVALS] {len(report.history)} evaluations, {n_unique} unique individuals")
+
         passing: list[PassingStrategy] = []
         stage_results: list[StageResult] = []
+
+        # Stage 2 + Stage 3: iterate over unique individuals.
+        t2_start = time.time()
         for params, fit in sorted(
             seen.values(), key=lambda t: t[1], reverse=True
         ):
@@ -403,21 +417,28 @@ class TestEngine:
                     equity_curve_png=folder / "equity_curve.png",
                 )
             )
+        t3_end = time.time()
 
-        summary_path = self._save_summary(report, passing)
-        stage_csvs = self._save_stage_csvs(stage_results)
         n1 = sum(1 for s in stage_results if s.htf_train_pass)
         n2 = sum(1 for s in stage_results if s.m1_confirm_pass)
         n3 = sum(1 for s in stage_results if s.m1_oos_pass)
-        print(
-            f"Optimization complete: {len(report.history)} evals, "
-            f"{len(passing)} passing strategies (summary: {summary_path})"
-        )
-        print(
-            f"Stage funnel: {len(stage_results)} unique -> {n1} pass H1 "
-            f"-> {n2} pass M1 confirm -> {n3} pass M1 OOS"
-        )
-        print(f"Stage CSVs: {stage_csvs}")
+
+        print(f"=== Stage 2: M1 confirm ===")
+        print(f"  [TIMING] {t3_end-t2_start:.1f}s")
+        print(f"  [PASSING] {n2} / {n1} passed M1 confirm")
+
+        print(f"=== Stage 3: M1 OOS ===")
+        print(f"  [TIMING] included in Stage 2 (same loop)")
+        print(f"  [PASSING] {n3} / {n2} passed M1 OOS")
+
+        summary_path = self._save_summary(report, passing)
+        stage_csvs = self._save_stage_csvs(stage_results)
+
+        print(f"=== Stages 1-3 Total ===")
+        print(f"  [TIMING] {time.time()-t_start:.1f}s")
+        print(f"  [PASSING] {len(passing)} strategies passed all 3 stages")
+        print(f"  [CSVs] {stage_csvs}")
+
         return OptimizationResult(
             report=report,
             passing=passing,

@@ -6,6 +6,7 @@ from composable.conditions import (
     close,
     const,
     indicator,
+    price,
     condition_from_genes,
 )
 from composable.composable import ComposableStrategy
@@ -16,6 +17,7 @@ __all__ = [
     "close",
     "const",
     "indicator",
+    "price",
     "condition_from_genes",
     "ComposableStrategy",
 ]

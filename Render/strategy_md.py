@@ -15,14 +15,32 @@ from pathlib import Path
 
 def describe_condition(c) -> str:
     """Human-readable description of a Condition."""
-    from composable.conditions import KIND_CLOSE, KIND_CONST, KIND_INDICATOR
+    from composable.conditions import (
+        KIND_CLOSE,
+        KIND_CONST,
+        KIND_HIGH,
+        KIND_INDICATOR,
+        KIND_LOW,
+        KIND_OPEN,
+    )
 
     def side_str(side) -> str:
         if side.kind == KIND_CONST:
             return f"{side.value:.2f}"
+        if side.kind == KIND_OPEN:
+            return "Open"
+        if side.kind == KIND_HIGH:
+            return "High"
+        if side.kind == KIND_LOW:
+            return "Low"
         if side.kind == KIND_CLOSE:
             return "Close"
-        return f"{side.indicator}({side.period})"
+        # Indicator: format with its shared params.
+        if side.period is not None and side.param2 is not None:
+            return f"{side.indicator}({side.period}, {side.param2})"
+        if side.period is not None:
+            return f"{side.indicator}({side.period})"
+        return f"{side.indicator}"
 
     op_names = {
         "gt": ">",

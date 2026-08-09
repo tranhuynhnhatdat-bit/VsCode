@@ -12,6 +12,13 @@ AND the (possibly negated) condition combination must hold.
 Conditions are decoded from GA genes via `condition_from_genes`; the
 constructor accepts either pre-built Condition objects (for tests) or the
 gene dict (for the GA). See `build_param_space()` for the GA gene layout.
+
+Param layout (Option B — MQL5-handle style):
+- Global per-parent indicator params shared across all condition slots
+  (e.g. `sma_period`, `rsi_period`, `bb_period` + `bb_stddev`, ...).
+- Per-slot genes only pick WHICH indicator line + op + threshold.
+- The strategy resolves each condition's indicator operand period/param2
+  from the global params at construction time.
 """
 
 from __future__ import annotations
@@ -23,6 +30,9 @@ import pandas as pd
 
 from composable import indicators as ind
 from composable.conditions import (
+    INDICATOR_REGISTRY,
+    KIND_INDICATOR,
+    Operand,
     Condition,
     condition_from_genes,
 )
@@ -36,6 +46,25 @@ DEFAULT_ENTRY_HOUR = 1  # H1 bar whose close is known at 02:00 fill
 DEFAULT_EXIT_HOUR = 22  # H1 bar whose close is known at 23:00 fill
 DEFAULT_SESSION_DAYS = (2, 4)
 
+# Global param keys per indicator parent: (period_key, param2_key_or_None).
+# param2 is the second shared param (e.g. bb_stddev, macd_slow, stoch_d).
+PARENT_PARAMS: dict[str, tuple[str, str | None]] = {
+    "SMA": ("sma_period", None),
+    "EMA": ("ema_period", None),
+    "ATR": ("atr_period", None),
+    "RSI": ("rsi_period", None),
+    "CCI": ("cci_period", None),
+    "Stochastic": ("stoch_k", "stoch_d"),
+    "ADX": ("adx_period", None),
+    "Bollinger": ("bb_period", "bb_stddev"),
+    "MACD": ("macd_fast", "macd_slow"),
+    "Momentum": ("mom_period", None),
+    "WPR": ("wpr_period", None),
+    "MFI": ("mfi_period", None),
+    "OBV": (None, None),
+    "Ichimoku": ("ichi_tenkan", "ichi_kijun"),
+}
+
 
 class ComposableStrategy(Strategy):
     """Fixed time/session base + up to N GA-composed conditions.
@@ -47,10 +76,12 @@ class ComposableStrategy(Strategy):
       conditions: optional pre-built list of Condition objects (tests).
       sl_atr: ATR stop-loss multiplier (0 = no SL).
       atr_period: ATR period for the stop.
-      **genes: remaining kwargs are GA condition genes (cond1_type,
-        cond1_op, cond1_period, cond1_ind, cond1_threshold, ...). The GA
-        drops its whole params dict into the constructor, so these arrive
-        as flat kwargs and are decoded via `_decode_conditions`.
+      **genes: remaining kwargs are GA genes — global indicator params
+        (sma_period, rsi_period, ...) plus per-slot genes (cond1_type,
+        cond1_op, cond1_ind, cond1_ind2, cond1_price, cond1_price2,
+        cond1_threshold, ...). The GA drops its whole params dict into the
+        constructor, so these arrive as flat kwargs and are decoded via
+        `_decode_conditions`.
     """
 
     def __init__(
@@ -75,11 +106,20 @@ class ComposableStrategy(Strategy):
         self.sl_atr = sl_atr
         self.atr_period = atr_period
 
+        # Store the global indicator params (Option B) for operand resolution.
+        self.global_params = {
+            k: v for k, v in genes.items() if k in _GLOBAL_PARAM_KEYS
+        }
+
         # Resolve conditions: explicit list wins over gene decoding.
         if conditions is not None:
             self.conditions = list(conditions)
         else:
             self.conditions = self._decode_conditions(genes)
+        # Inject global params into each condition's indicator operands.
+        for c in self.conditions:
+            self._resolve_operand(c.left)
+            self._resolve_operand(c.right)
 
     # ------------------------------------------------------------------ #
     # Strategy interface
@@ -173,6 +213,27 @@ class ComposableStrategy(Strategy):
                 result.append(c)
         return result
 
+    def _resolve_operand(self, op: Operand) -> None:
+        """Fill an indicator operand's period/param2 from global params."""
+        if op.kind != KIND_INDICATOR or op.indicator is None:
+            return
+        parent = INDICATOR_REGISTRY[op.indicator][0]
+        period_key, param2_key = PARENT_PARAMS[parent]
+        if period_key is not None:
+            op.period = int(self.global_params.get(period_key, 14))
+        if param2_key is not None:
+            op.param2 = self.global_params.get(param2_key)
+
+
+# All global param keys (for filtering genes in the constructor).
+_GLOBAL_PARAM_KEYS = {
+    "sma_period", "ema_period", "atr_period", "rsi_period", "cci_period",
+    "stoch_k", "stoch_d", "stoch_slowing", "adx_period",
+    "bb_period", "bb_stddev", "macd_fast", "macd_slow",
+    "mom_period", "wpr_period", "mfi_period",
+    "ichi_tenkan", "ichi_kijun", "ichi_senkou",
+}
+
 
 def build_param_space(
     max_conditions: int = 3,
@@ -180,37 +241,73 @@ def build_param_space(
     periods: tuple[int, ...] = (5, 10, 14, 20, 50),
     thresholds: tuple[float, ...] = (20.0, 30.0, 50.0, 70.0, 80.0),
 ) -> dict[str, Any]:
-    """Build the GA ParamSpace dict for condition slots.
+    """Build the GA ParamSpace dict (Option B — global per-parent params).
 
-    Each slot has:
-      <i>_type:      none | price_ind | ind_const
+    Global params (shared across all slots, MQL5-handle style):
+      sma_period, ema_period, atr_period, rsi_period, cci_period,
+      stoch_k, stoch_d, stoch_slowing, adx_period, bb_period, bb_stddev,
+      macd_fast, macd_slow, mom_period, wpr_period, mfi_period,
+      ichi_tenkan, ichi_kijun, ichi_senkou
+    Plus `connective` and `sl_atr`.
+
+    Per-slot genes (each slot just picks which indicator + op + threshold):
+      <i>_type:      none | price_ind | price_price | ind_const | ind_ind
       <i>_op:        gt | lt | crosses_above | crosses_below
-      <i>_period:    indicator period (range)
-      <i>_ind:       indicator name
-      <i>_threshold: constant threshold
-    Plus a global `connective: [and, or]`.
+      <i>_ind:       indicator line name
+      <i>_ind2:      indicator line name (ind_ind right side)
+      <i>_price:     Open | High | Low | Close (price_price / price_ind left)
+      <i>_price2:    Open | High | Low | Close (price_price right)
+      <i>_threshold: float (ind_const; validated per-indicator scale)
 
     The GA drops its whole params dict into `ComposableStrategy(**params)`;
     `max_conditions` is NOT part of the space (fixed at its constructor
-    default of 3), while `connective` and the per-slot genes arrive as flat
-    kwargs and are decoded by the strategy constructor.
+    default of 3), while `connective`, the global params, and the per-slot
+    genes arrive as flat kwargs and are decoded by the strategy constructor.
     """
-    indicators = indicators or ("SMA", "EMA", "ATR", "RSI", "CCI", "Stochastic", "ADX")
+    indicators = indicators or tuple(INDICATOR_REGISTRY.keys())
     space: dict[str, Any] = {
         "connective": list(CONNECTIVES),
         # ATR stop-loss multiplier (>= 1.0 so positions get a non-zero SL
         # distance, which the engine needs to size lots). Optimized by GA.
         "sl_atr": {"min": 1.0, "max": 5.0, "step": 0.5},
+        # Global per-parent indicator params (Option B).
+        "sma_period": {"min": periods[0], "max": periods[-1], "step": 1},
+        "ema_period": {"min": periods[0], "max": periods[-1], "step": 1},
+        "atr_period": {"min": periods[0], "max": periods[-1], "step": 1},
+        "rsi_period": {"min": periods[0], "max": periods[-1], "step": 1},
+        "cci_period": {"min": periods[0], "max": periods[-1], "step": 1},
+        "stoch_k": {"min": periods[0], "max": periods[-1], "step": 1},
+        "stoch_d": {"min": 3, "max": 10, "step": 1},
+        "stoch_slowing": {"min": 1, "max": 5, "step": 1},
+        "adx_period": {"min": periods[0], "max": periods[-1], "step": 1},
+        "bb_period": {"min": periods[0], "max": periods[-1], "step": 1},
+        "bb_stddev": [1.0, 2.0, 3.0],
+        "macd_fast": [5, 8, 12, 20],
+        "macd_slow": [20, 26, 40, 50],
+        "mom_period": {"min": periods[0], "max": periods[-1], "step": 1},
+        "wpr_period": {"min": periods[0], "max": periods[-1], "step": 1},
+        "mfi_period": {"min": periods[0], "max": periods[-1], "step": 1},
+        "ichi_tenkan": [9, 12, 20],
+        "ichi_kijun": [26, 30, 40],
+        "ichi_senkou": [52, 60, 80],
     }
     for i in range(1, max_conditions + 1):
         p = f"cond{i}_"
         space[f"{p}type"] = [
             "none",
             "price_ind",
+            "price_price",
             "ind_const",
+            "ind_ind",
         ]
         space[f"{p}op"] = list(("gt", "lt", "crosses_above", "crosses_below"))
-        space[f"{p}period"] = {"min": periods[0], "max": periods[-1], "step": 1}
         space[f"{p}ind"] = list(indicators)
-        space[f"{p}threshold"] = {"min": thresholds[0], "max": thresholds[-1], "step": 5.0}
+        space[f"{p}ind2"] = list(indicators)
+        space[f"{p}price"] = ["Open", "High", "Low", "Close"]
+        space[f"{p}price2"] = ["Open", "High", "Low", "Close"]
+        space[f"{p}threshold"] = {
+            "min": thresholds[0],
+            "max": thresholds[-1],
+            "step": 5.0,
+        }
     return space

@@ -166,20 +166,21 @@ void OnTick()
       return;
      }
 
-   //--- EXIT: at/after 23:00 the 22:00 H1 bar has just closed.
-   //--- Close positions that were opened the same calendar day.
-   if(hour == InpExitHour + 1)
-     {
-      if(!HasOpenPosition())
-         return;
-      if(!PositionOpenedThisSession(curTime))
-         return;
+    //--- EXIT: at/after 23:00 the 22:00 H1 bar has just closed.
+    //--- Close any open position (regardless of open day).
+    //--- The Python engine closes same-day, but if a position survives
+    //--- past midnight (e.g. due to data gaps), we must still close it
+    //--- on the next session day rather than letting it ride to SL.
+    if(hour == InpExitHour + 1)
+      {
+       if(!HasOpenPosition())
+          return;
 
-      //--- Close at market (BID), matching the engine's exit fill
-      if(!g_trade.PositionClose(_Symbol, 0))
-         Print("Close failed, error ", GetLastError());
-      return;
-     }
+       //--- Close at market (BID), matching the engine's exit fill
+       if(!g_trade.PositionClose(_Symbol, 0))
+          Print("Close failed, error ", GetLastError());
+       return;
+      }
   }
 
 //+------------------------------------------------------------------+
