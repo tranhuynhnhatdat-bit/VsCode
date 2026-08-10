@@ -25,6 +25,7 @@ from backtest.event_engine import (
     EventEngine,
     validate_with_event_engine,
 )
+from composable.composable import ComposableStrategy
 
 
 def test_tick_simulator() -> None:
@@ -57,14 +58,19 @@ def test_event_engine_empty() -> None:
         ticks_per_bar=20,
     )
 
-    empty_m1 = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"], dtype=float)
-    empty_h1 = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"], dtype=float)
-
-    result = engine.run(
-        entry_hour=1, exit_hour=22, session_days=(2, 4),
-        sl_atr=2.0, atr_period=14,
-        m1_df=empty_m1, htf_df=empty_h1,
+    empty_idx = pd.DatetimeIndex([])
+    empty_m1 = pd.DataFrame(
+        {"Open": [], "High": [], "Low": [], "Close": [], "Volume": []}, index=empty_idx
     )
+    empty_h1 = pd.DataFrame(
+        {"Open": [], "High": [], "Low": [], "Close": [], "Volume": []}, index=empty_idx
+    )
+
+    # Build an empty strategy + signals aligned to the empty H1 index.
+    strat = ComposableStrategy(entry_hour=1, exit_hour=22, session_days=(2, 4))
+    signals = strat.generate(empty_h1)
+
+    result = engine.run(signals, empty_h1, empty_m1)
 
     assert result["n_trades"] == 0
     assert result["metrics"]["final_equity"] == 10_000.0
@@ -178,11 +184,11 @@ def test_event_engine_with_aligned_data() -> None:
         ticks_per_bar=5,  # Fewer ticks for speed
     )
 
-    result = engine.run(
-        entry_hour=1, exit_hour=22, session_days=(2, 4),
-        sl_atr=2.0, atr_period=14,
-        m1_df=m1, htf_df=h1,
-    )
+    # Build a pure-time ComposableStrategy (no conditions) and generate signals.
+    strat = ComposableStrategy(entry_hour=1, exit_hour=22, session_days=(2, 4))
+    signals = strat.generate(h1)
+
+    result = engine.run(signals, h1, m1)
 
     assert "metrics" in result
     assert "equity_curve" in result

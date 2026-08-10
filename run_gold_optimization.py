@@ -1,7 +1,7 @@
 """Run the GoldSession 3-stage optimization on XAUUSD and save passing strategies.
 
 Stage 1: GA on H1 (train window only) — fast screen.
-Stage 2: M1 confirmation (same train window) — M1 PF >= 90% of H1 PF.
+Stage 2: M1 confirmation (same train window) — M1 PF > 1.1.
 Stage 3: M1 OOS1/OOS2 gates.
 
 Saves to results/:
@@ -32,9 +32,8 @@ HTF_TRAIN_GATES = {
     "win_rate": 35.0,
 }
 
-# Stage 2: M1 confirmation ratio.
-M1_CONFIRM_RATIO = 0.9
-M1_PF_CAP = 10.0
+# Stage 2: M1 confirmation — simple absolute profit-factor gate.
+M1_CONFIRM_PF = 1.1
 
 # Stage 3: M1 OOS gates.
 M1_OOS_GATES = {
@@ -99,8 +98,7 @@ def main() -> None:
         split=(0.30, 0.50, 0.20),
         fitness_criterion="pf",
         htf_train_gates=HTF_TRAIN_GATES,
-        m1_confirm_ratio=M1_CONFIRM_RATIO,
-        m1_pf_cap=M1_PF_CAP,
+        m1_confirm_pf=M1_CONFIRM_PF,
         m1_oos_gates=M1_OOS_GATES,
         strategy_name="gold_session",
         results_dir=RESULTS_DIR,

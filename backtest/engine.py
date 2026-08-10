@@ -5,8 +5,11 @@ Design (from grilling session):
 - Entries/exits fill at the M1 bar open at/after the HTF actionable time
   (the first tick of the target M1 bar, matching the MQL5 engine)
 - Long entries fill at ASK (open + spread); exits fill at BID (open).
-  The spread is charged as a fixed fee on entry using the per-bar Spread
-  column from the data (fixed spread, MQL5 export format).
+  The spread cost is captured through the ask/bid fill differential of the
+  shared M1 core (a long buys at ask, exits at bid), matching the H1 screen's
+  single spread cost (spread_points * tick_value * size). The H1 screen
+  (run_htf) charges the spread as a single fixed fee on entry from the
+  per-bar Spread column instead — both paths model the same one-time cost.
 - SL-first on simultaneous SL/TP hit; gap-through-SL fills at the worse price
 - Fixed risk money per trade -> lot per entry (matches MQL5 RiskToLots:
   lots = riskMoney / (stopDistance * tickValue/tickSize), rounded down to
@@ -30,6 +33,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from backtest._m1_core import run_m1
+from backtest._mapping import (
+    HTF_OFFSET as _HTF_OFFSET,
+    map_signals_to_m1,
+    map_stops_to_m1,
+)
 from data_manager import DataManager
 from symbol_info import SymbolInfo
 from strategy.base import StrategySignals
@@ -46,21 +55,6 @@ COMMISSION = 0.0
 # the lot size. The equity curve is shifted back to start at
 # initial_capital after the run.
 _CASH_CEILING = 1e15
-
-# HTF timeframe -> pandas offset. The HTF bar timestamp is the bar's OPEN
-# time; a signal computed from that bar's close is only known one period
-# later. Used to shift signal timestamps before mapping to M1 fills.
-_HTF_OFFSET = {
-    "M1": "1min",
-    "M5": "5min",
-    "M15": "15min",
-    "M30": "30min",
-    "H1": "1h",
-    "H4": "4h",
-    "D1": "1D",
-    "W1": "1W",
-    "MN1": "1ME",
-}
 
 
 @dataclass
@@ -118,11 +112,22 @@ class BacktestEngine:
         self._dm = DataManager()
         self._si = SymbolInfo()
 
+        # Cache of precomputed M1 frames + scaled arrays keyed by
+        # (start, end). Loading multi-year M1 and re-scaling prices on every
+        # run() call is the dominant cost in the M1 funnel; this cache makes
+        # repeated runs over the same window near-free.
+        self._prep_cache: dict[tuple, dict | None] = {}
+
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
     def run(self, signals: StrategySignals, htf_df: pd.DataFrame) -> BacktestResult:
         """Backtest the given signals on M1 data.
+
+        Uses the shared Numba M1 core (backtest/_m1_core.run_m1), which is the
+        same execution path the event-driven engine uses, so the two engines
+        produce identical trades and metrics. This is both faster than vectorbt
+        and exactly matches the event engine's MQL5 "1 minute OHLC" semantics.
 
         Args:
             signals: StrategySignals indexed by the strategy's HTF DateTime.
@@ -131,125 +136,23 @@ class BacktestEngine:
         Returns:
             BacktestResult with metrics, daily equity curve, and trades.
         """
-        # 1. Validate signals against the HTF df.
-        signals.validate(htf_df)
-
-        # 2. Pull M1 data for the signal range (plus a buffer for fills).
+        # Pull M1 data for the signal range (plus a buffer for fills), cached
+        # along with the symbol metadata and spread.
         start = htf_df.index[0]
         end = htf_df.index[-1] + pd.Timedelta(days=1)
-        m1 = self._dm.load(self.symbol, "M1", start=start, end=end)
-        if m1.empty:
+        prep = self._prep_m1(start, end)
+        if prep is None:
             return self._empty_result(start, end)
 
-        # 3. Load symbol metadata.
-        info = self._si.get(self.symbol)
-        tick_value = float(info["trade_tick_value"])
-        tick_size = float(info["trade_tick_size"])
-        volume_step = float(info["volume_step"])
-        volume_min = float(info["volume_min"])
-        volume_max = float(info["volume_max"])
-        swap_long = float(info["swap_long"])
-        swap_short = float(info["swap_short"])
-        swap_rollover3days = int(info["swap_rollover3days"])
-
-        # Per-bar spread (points) from the data; fall back to symbol_info.
-        spread_points = self._spread_series(m1, info)
-
-        # 4. Map HTF signals to M1.
-        m1_entries, m1_exits, m1_s_entries, m1_s_exits = self._map_signals(
-            signals, m1.index
-        )
-
-        # 5. Resolve SL: absolute prices for vectorbt + distances for sizing.
-        m1_sl_abs, m1_sl_dist = self._resolve_sl(
-            signals,
-            m1_entries,
-            m1_s_entries,
-            m1["Open"],
-            spread_points,
-            tick_size,
-            m1.index,
-        )
-        m1_tp = self._map_stops(signals.tp_stop, m1.index)
-
-        # 6. Compute per-entry lot sizes (fixed risk money per trade).
-        m1_size = self._compute_sizes(
-            m1_entries,
-            m1_s_entries,
-            m1_sl_dist,
-            tick_value,
-            tick_size,
-            volume_step,
-            volume_min,
-            volume_max,
-        )
-
-        # 7. Scale prices so vectorbt PnL = real forex PnL in deposit currency.
-        scale = tick_value / tick_size
-        close = m1["Close"] * scale
-        open_ = m1["Open"] * scale
-        high = m1["High"] * scale
-        low = m1["Low"] * scale
-        sl_scaled = m1_sl_abs * scale
-        tp_scaled = m1_tp * scale
-
-        # Spread as a fixed fee on entry (buy at ask = bid + spread).
-        # fee = spread_points * tick_value * size (tick_size cancels).
-        fixed_fees = pd.Series(0.0, index=m1.index)
-        entry_bars = m1_entries | m1_s_entries
-        fixed_fees.loc[entry_bars] = (
-            spread_points.loc[entry_bars] * tick_value * m1_size.loc[entry_bars]
-        )
-
-        # 8. Run vectorbt. init_cash is a huge ceiling so vectorbt never
-        #    reduces the position size to fit cash (MQL5 sizes purely from
-        #    risk money). The equity curve is shifted back to start at
-        #    initial_capital below.
-        import vectorbt as vb
-
-        pf = vb.Portfolio.from_signals(
-            close=close,
-            entries=m1_entries,
-            exits=m1_exits,
-            short_entries=m1_s_entries,
-            short_exits=m1_s_exits,
-            size=m1_size,
-            price=open_,
-            open=open_,
-            high=high,
-            low=low,
-            sl_stop=sl_scaled,
-            tp_stop=tp_scaled,
-            fixed_fees=fixed_fees,
-            init_cash=_CASH_CEILING,
-            lock_cash=False,
-            accumulate=False,
-            upon_opposite_entry="ignore",
-            freq="1min",
-        )
-
-        # 9. Post-process swap and build equity curve.
-        trades = pf.trades.records
-        m1_equity = pf.value()
-        swap_series = self._compute_swap(
-            trades, m1.index, swap_long, swap_short, swap_rollover3days
-        )
-        # Shift the curve from the cash ceiling back to initial_capital.
-        m1_equity_adj = (
-            m1_equity - (_CASH_CEILING - self.initial_capital)
-            - swap_series.cumsum()
-        )
-        daily_equity = m1_equity_adj.resample("D").last().dropna()
-
-        # 10. Compute metrics.
-        metrics = self._compute_metrics(
-            daily_equity, trades, m1.index, m1_equity_adj
+        result = run_m1(
+            signals, htf_df, prep["m1"], self.timeframe, prep["info"],
+            self.initial_capital, self.risk_money,
         )
 
         return BacktestResult(
-            metrics=metrics,
-            equity_curve=daily_equity,
-            trades=trades,
+            metrics=result["metrics"],
+            equity_curve=result["equity_curve"],
+            trades=result["trades"],
             symbol=self.symbol,
             timeframe=self.timeframe,
             strategy_name=self.strategy_name,
@@ -368,50 +271,46 @@ class BacktestEngine:
         )
 
     # ------------------------------------------------------------------ #
-    # HTF -> M1 mapping
+    # HTF -> M1 mapping (shared with the event engine)
     # ------------------------------------------------------------------ #
     def _map_signals(
         self, signals: StrategySignals, m1_index: pd.DatetimeIndex
     ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
         """Map HTF entry/exit signals to the M1 bar at/after each actionable time.
 
-        The HTF bar timestamp is the bar's OPEN time. A signal at HTF time T
-        is computed from that bar's close, known at T + htf_period. The fill
-        is the first M1 bar at or after T + htf_period — the first tick of
-        the target M1 bar, matching the MQL5 engine's fill timing.
+        Delegates to the shared vectorized helper so both engines use the
+        exact same HTF -> M1 mapping.
         """
-        period = pd.Timedelta(_HTF_OFFSET[self.timeframe])
-        n = len(m1_index)
-        entries = pd.Series(False, index=m1_index)
-        exits = pd.Series(False, index=m1_index)
-        s_entries = pd.Series(False, index=m1_index)
-        s_exits = pd.Series(False, index=m1_index)
+        return map_signals_to_m1(signals, m1_index, self.timeframe)
 
-        for name, target in (
-            ("entries", entries),
-            ("exits", exits),
-            ("short_entries", s_entries),
-            ("short_exits", s_exits),
-        ):
-            sig_series = getattr(signals, name)
-            for t in sig_series[sig_series].index:
-                actionable = t + period
-                pos = m1_index.searchsorted(actionable, side="left")
-                if pos < n:
-                    target.iloc[pos] = True
-        return entries, exits, s_entries, s_exits
-
-    @staticmethod
     def _map_stops(
-        htf_stops: pd.Series, m1_index: pd.DatetimeIndex
+        self, htf_stops: pd.Series, m1_index: pd.DatetimeIndex
     ) -> pd.Series:
-        """Map HTF SL/TP to M1 via forward-fill.
+        """Map HTF SL/TP to M1 via forward-fill (shared with the event engine)."""
+        return map_stops_to_m1(htf_stops, m1_index, self.timeframe)
 
-        Each M1 bar gets the stop value of the most recent HTF bar whose
-        close has already happened. Since positions open strictly after the
-        HTF entry bar, there is no lookahead.
+    # ------------------------------------------------------------------ #
+    # M1 preparation (cached)
+    # ------------------------------------------------------------------ #
+    def _prep_m1(self, start, end) -> dict | None:
+        """Load M1 for [start, end] and cache it with the symbol metadata.
+
+        Returns a dict with the M1 frame and SymbolInfo metadata, or None if
+        there is no M1 data in the range. Cached by (start, end) so repeated
+        runs over the same window skip the expensive M1 load.
         """
-        return htf_stops.reindex(m1_index, method="ffill")
+        key = (start, end)
+        if key in self._prep_cache:
+            return self._prep_cache[key]
+
+        m1 = self._dm.load(self.symbol, "M1", start=start, end=end)
+        if m1.empty:
+            self._prep_cache[key] = None
+            return None
+
+        prep = {"m1": m1, "info": self._si.get(self.symbol)}
+        self._prep_cache[key] = prep
+        return prep
 
     # ------------------------------------------------------------------ #
     # SL resolution (absolute prices vs distances)
@@ -554,10 +453,27 @@ class BacktestEngine:
 
         Swap accrues per calendar day held (from entry day through the day
         before exit). The configured rollover weekday carries a 3x charge.
+
+        Vectorized: the last-M1-bar-of-each-day lookup is precomputed once
+        into a dict, avoiding an O(n) mask creation per (trade, day).
         """
         swap = pd.Series(0.0, index=m1_index)
         if trades.empty:
             return swap
+
+        # Map each calendar day -> index of its last M1 bar (single pass).
+        dates = m1_index.normalize()
+        is_last = np.empty(len(dates), dtype=bool)
+        is_last[:-1] = dates[:-1].values != dates[1:].values
+        is_last[-1] = True
+        last_of_day = {}
+        for pos in np.flatnonzero(is_last):
+            last_of_day[dates[pos]] = pos
+
+        # MT5 SYMBOL_SWAP_ROLLOVER3DAYS uses 0=Sunday..6=Saturday; Python's
+        # weekday() uses 0=Monday..6=Sunday. Convert: 3x day in Python terms
+        # is (swap_rollover3days - 1) % 7. Negative means "no 3x rollover".
+        rollover_py = (swap_rollover3days - 1) % 7 if swap_rollover3days >= 0 else -2
 
         for _, tr in trades.iterrows():
             entry_idx = int(tr["entry_idx"])
@@ -575,11 +491,9 @@ class BacktestEngine:
             # Days charged: entry_date .. exit_date-1 (rollover at end of day).
             for d in range(days_held):
                 day = entry_time.date() + pd.Timedelta(days=d)
-                mult = 3 if day.weekday() == swap_rollover3days else 1
-                # Place the charge at the last M1 bar of that day.
-                day_mask = m1_index.date == day
-                if day_mask.any():
-                    last_pos = int(np.where(day_mask)[0][-1])
+                mult = 3 if day.weekday() == rollover_py else 1
+                last_pos = last_of_day.get(pd.Timestamp(day))
+                if last_pos is not None:
                     swap.iloc[last_pos] += rate * size * mult
         return swap
 
@@ -640,11 +554,10 @@ class BacktestEngine:
             profit_factor = 0.0
             avg_trade_pct = 0.0
 
-        # Exposure: fraction of M1 bars in a position.
+        # Exposure: fraction of M1 bars in a position (vectorized).
         if not trades.empty and len(m1_index) > 0:
-            held_bars = sum(
-                int(tr["exit_idx"]) - int(tr["entry_idx"]) + 1
-                for _, tr in trades.iterrows()
+            held_bars = int(
+                (trades["exit_idx"].astype(int) - trades["entry_idx"].astype(int) + 1).sum()
             )
             exposure_pct = float(held_bars / len(m1_index) * 100)
         else:

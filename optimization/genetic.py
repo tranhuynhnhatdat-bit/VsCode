@@ -8,6 +8,19 @@ Design (from grilling session):
 - Structural constraints e.g. ("fast", "<", "slow") reject invalid births
 - Early stop after N stagnant generations; optional evaluation budget
 - Pure numeric engine: fitness is a caller-supplied float
+
+Island model (added for diversity):
+- N independent populations (islands) evolve in parallel
+- Ring migration: every `migration_interval` generations, each island sends
+  its top-`migration_count` fittest individuals to the ring neighbor,
+  replacing the worst in the destination
+- Restart-on-stagnation: an island that stagnates for
+  `restart_stagnation` generations resets its population to fresh seeds
+  (shared collected set + global best persist across restarts)
+- A caller-supplied `collect_fn` is called for every evaluated individual;
+  it may add the individual to a shared "collected" set. The run stops
+  when `stop_fn()` returns True (e.g. collected set reached target size)
+  or the evaluation budget is exhausted.
 """
 
 from __future__ import annotations
@@ -174,6 +187,11 @@ class GAConfig:
     initial_population: list[dict[str, Any]] | None = None
     seed: int | None = None
     workers: int = 1
+    # Island model.
+    islands: int = 1
+    migration_interval: int = 5
+    migration_count: int = 2
+    restart_stagnation: int = 3
 
 
 @dataclass
@@ -198,6 +216,11 @@ class GeneticOptimizer:
 
     Fitness is computed by a caller-supplied callable; the optimizer only
     orchestrates selection / crossover / mutation / survival.
+
+    Supports an island model: `config.islands` independent populations that
+    migrate on a ring topology. A caller-supplied `collect_fn` is called for
+    each evaluated individual; a `stop_fn` decides when to halt (e.g. a
+    shared collected set reached its target size).
     """
 
     def __init__(
@@ -208,6 +231,8 @@ class GeneticOptimizer:
         constraints: list[tuple[str, str, str]] | None = None,
         batch_fitness_fn: Callable[[list[dict[str, Any]]], list[float]]
         | None = None,
+        collect_fn: Callable[[dict[str, Any], float], None] | None = None,
+        stop_fn: Callable[[], bool] | None = None,
     ) -> None:
         if config.population < 1:
             raise ValueError("population must be >= 1")
@@ -217,12 +242,18 @@ class GeneticOptimizer:
             raise ValueError("elitism cannot exceed population")
         if not (0.0 < config.mutation_rate <= 1.0):
             raise ValueError("mutation_rate must be in (0, 1]")
+        if config.islands < 1:
+            raise ValueError("islands must be >= 1")
         self.space = param_space
         self.fitness_fn = fitness_fn
         self.batch_fitness_fn = batch_fitness_fn
         self.config = config
         self.is_valid = make_validator(constraints)
         self.rng = random.Random(config.seed)
+        self.collect_fn = collect_fn
+        self.stop_fn = stop_fn
+        # params-key -> last fitness, for migration ranking.
+        self._fitness_cache: dict[str, float] = {}
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -233,94 +264,227 @@ class GeneticOptimizer:
         rng = self.rng
         history: list[IndividualRecord] = []
         order = 0
+        best_fitness = float("-inf")
+        best_individual: dict[str, Any] | None = None
 
-        def _eval(ind: dict[str, Any], idx: int) -> float:
-            nonlocal order
+        def _eval(ind: dict[str, Any]) -> float:
+            nonlocal order, best_fitness, best_individual
             fit = self.fitness_fn(ind)
             history.append(IndividualRecord(dict(ind), fit, order))
+            self._fitness_cache[self._key(ind)] = fit
             order += 1
+            if self.collect_fn is not None:
+                self.collect_fn(ind, fit)
+            if fit > best_fitness:
+                best_fitness = fit
+                best_individual = dict(ind)
             return fit
 
-        # Initial population: seeded individuals first, then random fill.
-        pop: list[dict[str, Any]] = []
-        for s in cfg.initial_population or []:
-            seed = {k: v for k, v in s.items() if k in self.space.names}
-            if self.is_valid(seed):
-                pop.append(seed)
-        while len(pop) < cfg.population:
-            ind = self.space.random_individual(rng)
-            if self.is_valid(ind):
-                pop.append(ind)
-        pop = pop[: cfg.population]
+        def _eval_batch(pop: list[dict[str, Any]]) -> list[float]:
+            nonlocal order, best_fitness, best_individual
+            fits = self.batch_fitness_fn(pop)
+            out: list[float] = []
+            for ind, fit in zip(pop, fits):
+                history.append(IndividualRecord(dict(ind), fit, order))
+                self._fitness_cache[self._key(ind)] = fit
+                order += 1
+                if self.collect_fn is not None:
+                    self.collect_fn(ind, fit)
+                if fit > best_fitness:
+                    best_fitness = fit
+                    best_individual = dict(ind)
+                out.append(fit)
+            return out
 
-        best_fitness = float("-inf")
-        stagnant = 0
-        fitness: list[float] = []
+        def _should_stop() -> bool:
+            if self.stop_fn is not None and self.stop_fn():
+                return True
+            if cfg.max_evaluations is not None and order >= cfg.max_evaluations:
+                return True
+            return False
+
+        # Initial populations: one per island.
+        pop_islands: list[list[dict[str, Any]]] = [
+            self._initial_population(rng) for _ in range(cfg.islands)
+        ]
+        # Per-island stagnation + best-fitness tracking.
+        island_best: list[float] = [float("-inf")] * cfg.islands
+        island_stagnant: list[int] = [0] * cfg.islands
 
         for gen in range(cfg.generations):
-            if self.batch_fitness_fn is not None and cfg.workers > 1:
-                fits = self.batch_fitness_fn(pop)
-                fitness = []
-                for ind, fit in zip(pop, fits):
-                    history.append(IndividualRecord(dict(ind), fit, order))
-                    order += 1
-                    fitness.append(fit)
-            else:
-                fitness = [_eval(ind, i) for i, ind in enumerate(pop)]
-            gen_best = max(fitness)
-            if gen_best > best_fitness:
-                best_fitness = gen_best
-                stagnant = 0
-            else:
-                stagnant += 1
-            best = max(history, key=lambda r: r.fitness)
+            for i_island, pop in enumerate(pop_islands):
+                if self.batch_fitness_fn is not None and cfg.workers > 1:
+                    fitness = _eval_batch(pop)
+                else:
+                    fitness = [_eval(ind) for ind in pop]
 
+                gen_best = max(fitness)
+                if gen_best > island_best[i_island]:
+                    island_best[i_island] = gen_best
+                    island_stagnant[i_island] = 0
+                else:
+                    island_stagnant[i_island] += 1
+
+                # Evaluate stagnation / restart for this island.
+                if island_stagnant[i_island] >= cfg.restart_stagnation:
+                    print(
+                        f"  Island {i_island + 1} stagnated "
+                        f"{island_stagnant[i_island]} gens — restarting "
+                        f"population (collected set preserved)"
+                    )
+                    pop_islands[i_island] = self._initial_population(
+                        rng, warm=best_individual
+                    )
+                    island_best[i_island] = float("-inf")
+                    island_stagnant[i_island] = 0
+                    continue
+
+                # Build next generation for this island.
+                pop_islands[i_island] = self._next_generation(
+                    pop, fitness, rng
+                )
+
+            # Global print.
             print(
                 f"  GA gen {gen + 1}/{cfg.generations} | "
                 f"best fitness {best_fitness:.4f} | evals {order}"
             )
 
-            if cfg.max_evaluations is not None and order >= cfg.max_evaluations:
-                print(
-                    f"  GA stopping: evaluation budget "
-                    f"{cfg.max_evaluations} reached"
-                )
+            # Migration (ring topology) after each generation.
+            if cfg.islands > 1 and (gen + 1) % cfg.migration_interval == 0:
+                self._migrate(pop_islands, rng)
+
+            # Stop conditions.
+            if _should_stop():
+                if self.stop_fn is not None and self.stop_fn():
+                    print(
+                        f"  GA stopping: collection target reached "
+                        f"({order} evals)"
+                    )
+                elif cfg.max_evaluations is not None:
+                    print(
+                        f"  GA stopping: evaluation budget "
+                        f"{cfg.max_evaluations} reached ({order} evals)"
+                    )
                 break
             if gen == cfg.generations - 1:
                 break
-            if stagnant >= cfg.early_stop_generations:
-                print(
-                    f"  GA stopping: no improvement for "
-                    f"{stagnant} generations"
-                )
-                break
 
-            # Build next generation: elitism + children.
-            ranked = sorted(
-                range(len(pop)), key=lambda i: fitness[i], reverse=True
-            )
-            elite = [dict(pop[i]) for i in ranked[: cfg.elitism]]
-            next_pop = list(elite)
-            while len(next_pop) < cfg.population:
-                parent_a = self._tournament(
-                    pop, fitness, rng, cfg.tournament_k
-                )
-                parent_b = self._tournament(
-                    pop, fitness, rng, cfg.tournament_k
-                )
-                child = self.space.crossover(parent_a, parent_b, rng)
-                child = self.space.mutate(child, cfg.mutation_rate, rng)
-                if not self.is_valid(child):
-                    child = self._valid_clone(child, cfg.mutation_rate, rng)
-                next_pop.append(child)
-            pop = next_pop
-
-        best = max(history, key=lambda r: r.fitness)
+        best = (
+            IndividualRecord(best_individual, best_fitness, 0)
+            if best_individual is not None
+            else None
+        )
         return GAReport(best=best, history=history)
 
     # ------------------------------------------------------------------ #
     # Internals
     # ------------------------------------------------------------------ #
+    def _initial_population(
+        self,
+        rng: random.Random,
+        warm: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Build a fresh population; optionally warm-start with `warm`."""
+        cfg = self.config
+        pop: list[dict[str, Any]] = []
+        for s in cfg.initial_population or []:
+            seed = {k: v for k, v in s.items() if k in self.space.names}
+            if self.is_valid(seed):
+                pop.append(seed)
+        if warm is not None and self.is_valid(warm):
+            pop.append(dict(warm))
+        while len(pop) < cfg.population:
+            ind = self.space.random_individual(rng)
+            if self.is_valid(ind):
+                pop.append(ind)
+        return pop[: cfg.population]
+
+    def _next_generation(
+        self,
+        pop: list[dict[str, Any]],
+        fitness: list[float],
+        rng: random.Random,
+    ) -> list[dict[str, Any]]:
+        """Build the next generation: elitism + children."""
+        cfg = self.config
+        ranked = sorted(
+            range(len(pop)), key=lambda i: fitness[i], reverse=True
+        )
+        elite = [dict(pop[i]) for i in ranked[: cfg.elitism]]
+        next_pop = list(elite)
+        while len(next_pop) < cfg.population:
+            parent_a = self._tournament(
+                pop, fitness, rng, cfg.tournament_k
+            )
+            parent_b = self._tournament(
+                pop, fitness, rng, cfg.tournament_k
+            )
+            child = self.space.crossover(parent_a, parent_b, rng)
+            child = self.space.mutate(child, cfg.mutation_rate, rng)
+            if not self.is_valid(child):
+                child = self._valid_clone(child, cfg.mutation_rate, rng)
+            next_pop.append(child)
+        return next_pop[: cfg.population]
+
+    def _migrate(
+        self,
+        pop_islands: list[list[dict[str, Any]]],
+        rng: random.Random,
+    ) -> None:
+        """Ring migration: each island sends its top-K to the ring neighbor."""
+        cfg = self.config
+        n = len(pop_islands)
+        if n < 2:
+            return
+
+        # Compute the top-K emigrants per island in advance.
+        emigrants: list[list[dict[str, Any]]] = []
+        for pop in pop_islands:
+            ranked = sorted(
+                pop,
+                key=lambda ind: self._fitness_cache.get(
+                    self._key(ind), float("-inf")
+                ),
+                reverse=True,
+            )
+            emigrants.append([dict(ind) for ind in ranked[: cfg.migration_count]])
+
+        # Replace the worst-K in each destination island.
+        for i in range(n):
+            dest = (i + 1) % n
+            dest_pop = pop_islands[dest]
+            # Find the worst-K indices by last fitness.
+            scored = [
+                (idx, self._fitness_cache.get(self._key(ind), float("inf")))
+                for idx, ind in enumerate(dest_pop)
+            ]
+            scored.sort(key=lambda t: t[1], reverse=True)  # worst first
+            worst_idx = [idx for idx, _ in scored[: cfg.migration_count]]
+            for idx, emigrant in zip(worst_idx, emigrants[i]):
+                dest_pop[idx] = emigrant
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _key(ind: dict[str, Any]) -> str:
+        import json
+
+        return json.dumps(ind, sort_keys=True, default=str)
+
+    @staticmethod
+    def _tournament(
+        pop: list[dict[str, Any]],
+        fitness: list[float],
+        rng: random.Random,
+        k: int = 3,
+    ) -> dict[str, Any]:
+        """Tournament selection: pick the fittest of k random candidates."""
+        idxs = [rng.randrange(len(pop)) for _ in range(k)]
+        best_i = max(idxs, key=lambda i: fitness[i])
+        return pop[best_i]
+
     def _valid_clone(
         self, ind: dict[str, Any], rate: float, rng: random.Random
     ) -> dict[str, Any]:
@@ -335,15 +499,3 @@ class GeneticOptimizer:
             if self.is_valid(fresh):
                 return fresh
         raise RuntimeError("could not generate a valid individual")
-
-    @staticmethod
-    def _tournament(
-        pop: list[dict[str, Any]],
-        fitness: list[float],
-        rng: random.Random,
-        k: int = 3,
-    ) -> dict[str, Any]:
-        """Tournament selection: pick the fittest of k random candidates."""
-        idxs = [rng.randrange(len(pop)) for _ in range(k)]
-        best_i = max(idxs, key=lambda i: fitness[i])
-        return pop[best_i]

@@ -1,26 +1,27 @@
-"""TestEngine: 3-stage optimization pipeline.
+"""TestEngine: two-phase optimization pipeline.
 
-Stage 1 — GA on the strategy's native timeframe (HTF), train window only.
+Phase A — GA collection (Stage 1 only):
+  Island-model GA on the strategy's native timeframe (HTF), train window only.
   - Fitness = profit factor on HTF train-window closed trades.
-  - Fast screen: HTF backtests are cheap (no M1 mapping).
-  - Runs on a train-window slice (with warmup) for speed; verified identical
-    to full-range metrics by _verify_slicing().
+  - Each evaluated individual is checked against the H1 train gate
+    (profit_factor, n_trades, win_rate) AND a behavioral-diversity gate
+    (Hamming distance over condition-slot genes vs the shared collected set).
+  - Survivors are collected into a SHARED set across all islands.
+  - The GA stops when the shared set reaches `collect_target` (default 500)
+    or the evaluation budget backstop is exhausted.
+  - No strategy folders are saved here — saving happens only after the
+    event-driven validation (Stage 4).
 
-Stage 2 — M1 confirmation (same train window).
-  - Survivors re-run on M1; M1 train PF must be >= m1_confirm_ratio * H1 PF.
-  - H1 PF is capped at m1_pf_cap for the ratio (infinite PF -> cap).
-  - Runs on a train-window M1 slice (with warmup) for speed.
-
-Stage 3 — M1 out-of-sample.
-  - Survivors tested on M1 OOS1/OOS2 windows (same timestamps as H1).
-  - Gates: per-window PF and trades/month thresholds.
-  - Runs on separate OOS1/OOS2 M1 slices (OOS2 gets warmup from train tail).
+Phase B — M1 funnel (fixed collected set):
+  `run_m1_funnel()` runs the collected survivors through:
+    - M1 confirmation on the train window (ratio gate)
+    - M1 OOS1/OOS2 gates (per-window PF and trades/month)
+  Returns the survivors with their stage metrics attached. The caller
+  (run_composable_optimization.py) then runs event-driven validation and
+  saves folders only for event-passing strategies.
 
 Windows are split by timestamp once (30% OOS1 / 50% train / 20% OOS2 of the
-date range) and used identically for HTF and M1, so the M1 confirmation and
-OOS tests align with the H1 train window.
-
-Passing strategies: equity PNG (train shaded) + summary JSON.
+date range) and used identically for HTF and M1.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ import math
 import random
 import time
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,16 @@ DEFAULT_M1_OOS_GATES: dict[str, dict[str, float]] = {
     "oos1": {"profit_factor": 1.0, "trades_per_month": 1.0},
     "oos2": {"profit_factor": 1.1, "trades_per_month": 1.0},
 }
+# Condition-slot genes used for behavioral diversity (the composed filters).
+CONDITION_GENES = (
+    "connective",
+    "cond1_type", "cond1_op", "cond1_ind", "cond1_ind2",
+    "cond1_price", "cond1_price2", "cond1_threshold",
+    "cond2_type", "cond2_op", "cond2_ind", "cond2_ind2",
+    "cond2_price", "cond2_price2", "cond2_threshold",
+    "cond3_type", "cond3_op", "cond3_ind", "cond3_ind2",
+    "cond3_price", "cond3_price2", "cond3_threshold",
+)
 DAYS_PER_MONTH = 30.44
 
 
@@ -126,6 +137,17 @@ def _compute_criterion_score(wm: dict[str, float], criterion: str) -> float:
     return float(pf * min(1.0, wm["n_trades"] / 100.0))
 
 
+def _condition_signature(params: dict[str, Any]) -> tuple[Any, ...]:
+    """Behavioral-diversity signature: the condition-slot genes."""
+    return tuple(params.get(g) for g in CONDITION_GENES)
+
+
+def _condition_hamming(a: dict[str, Any], b: dict[str, Any]) -> int:
+    """Number of differing condition-slot genes between two param sets."""
+    sa, sb = _condition_signature(a), _condition_signature(b)
+    return sum(1 for x, y in zip(sa, sb) if x != y)
+
+
 # ------------------------------------------------------------------ #
 # Parallel worker state (per-process, set by _worker_init)
 # ------------------------------------------------------------------ #
@@ -165,49 +187,38 @@ def _worker_fitness(params: dict[str, Any]) -> float:
 
 @dataclass
 class PassingStrategy:
-    """A strategy whose params passed all three stages."""
+    """A strategy's journey through the pipeline.
 
-    params: dict[str, Any]
-    htf_train_metrics: dict[str, float]
-    m1_train_metrics: dict[str, float]
-    m1_oos1_metrics: dict[str, float]
-    m1_oos2_metrics: dict[str, float]
-    equity_curve_png: Path | None = None
-
-
-@dataclass
-class StageResult:
-    """One individual's journey through the 3-stage pipeline.
-
-    Fields are None until the individual reaches that stage.
+    Stage metrics are populated only as the strategy passes each stage.
+    `hm_train_metrics` is set during Phase A; the M1 metrics are set during
+    Phase B; event fields are set by the caller after event validation.
     """
 
     params: dict[str, Any]
     fitness: float
-    htf_train: dict[str, float] | None = None
-    htf_train_pass: bool | None = None
-    htf_fail_reason: str | None = None
-    m1_train: dict[str, float] | None = None
-    m1_confirm_pass: bool | None = None
-    m1_confirm_fail_reason: str | None = None
-    m1_oos1: dict[str, float] | None = None
-    m1_oos2: dict[str, float] | None = None
-    m1_oos_pass: bool | None = None
-    m1_oos_fail_reason: str | None = None
+    htf_train_metrics: dict[str, float] | None = None
+    m1_train_metrics: dict[str, float] | None = None
+    m1_oos1_metrics: dict[str, float] | None = None
+    m1_oos2_metrics: dict[str, float] | None = None
+    event_metrics: dict[str, Any] | None = None
+    event_pass: bool | None = None
+    event_fail_reasons: list[str] = field(default_factory=list)
+    event_equity_curve: Any = None  # pd.Series from the event engine
+    event_trades: Any = None  # pd.DataFrame from the event engine
+    equity_curve_png: Path | None = None
 
 
 @dataclass
 class OptimizationResult:
-    """Result of a TestEngine optimization run."""
+    """Result of a TestEngine Phase-A optimization run (Stage-1 survivors)."""
 
     report: GAReport
     passing: list[PassingStrategy]
-    stage_results: list[StageResult] | None = None
     summary_path: Path | None = None
 
 
 class TestEngine:
-    """Runs the 3-stage pipeline: H1 GA -> M1 confirm -> M1 OOS."""
+    """Runs Phase A (GA collection) + provides Phase B (M1 funnel)."""
 
     def __init__(
         self,
@@ -225,10 +236,14 @@ class TestEngine:
         htf_train_gates: dict[str, float] | None = None,
         m1_confirm_ratio: float = 0.9,
         m1_pf_cap: float = 10.0,
+        m1_confirm_pf: float = 1.1,
         m1_oos_gates: dict[str, dict[str, float]] | None = None,
         results_dir: Path = RESULTS_DIR,
         start: str | None = None,
         end: str | None = None,
+        collect_target: int = 500,
+        diversity_threshold: int = 1,
+        max_collect_evaluations: int = 50_000,
     ) -> None:
         self.symbol = symbol
         self.timeframe = timeframe
@@ -243,6 +258,9 @@ class TestEngine:
         self.results_dir = Path(results_dir)
         self.start = start
         self.end = end
+        self.collect_target = collect_target
+        self.diversity_threshold = diversity_threshold
+        self.max_collect_evaluations = max_collect_evaluations
 
         if (
             len(self.split) != 3
@@ -262,6 +280,7 @@ class TestEngine:
         self.htf_train_gates = htf_train_gates or DEFAULT_HTF_TRAIN_GATES
         self.m1_confirm_ratio = m1_confirm_ratio
         self.m1_pf_cap = m1_pf_cap
+        self.m1_confirm_pf = m1_confirm_pf
         self.m1_oos_gates = m1_oos_gates or DEFAULT_M1_OOS_GATES
         bad = set(self.m1_oos_gates) - {"oos1", "oos2"}
         if bad:
@@ -282,18 +301,22 @@ class TestEngine:
         self._train_start = self._train_end = pd.Timestamp(0)
         self._oos2_start = self._oos2_end = pd.Timestamp(0)
         self._htf_cache: dict[str, BacktestResult] = {}
-        self._m1_cache: dict[str, BacktestResult] = {}
         self._m1_train_cache: dict[str, BacktestResult] = {}
         self._m1_oos1_cache: dict[str, BacktestResult] = {}
         self._m1_oos2_cache: dict[str, BacktestResult] = {}
         self._engine: BacktestEngine | None = None
         self._pool: ProcessPoolExecutor | None = None
 
+        # Phase A shared collection state.
+        self._collected: list[dict[str, Any]] = []
+        self._collected_keys: set[str] = set()
+        self._collected_metrics: dict[str, dict[str, float]] = {}
+
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
     def optimize(self) -> OptimizationResult:
-        """Run the 3-stage pipeline and save passing strategies."""
+        """Phase A: island GA collecting Stage-1 survivors. No folders saved."""
         t_start = time.time()
 
         self._load_data()
@@ -306,16 +329,42 @@ class TestEngine:
         )
         self._verify_slicing()
 
-        # Stage 1: GA on H1 train.
+        # Reset collection state (in case optimize() is called twice).
+        self._collected = []
+        self._collected_keys = set()
+        self._collected_metrics = {}
+
+        # Stage 1: island GA with shared collection.
         t0 = time.time()
+        ga_config = GAConfig(
+            population=self.ga_config.population,
+            generations=self.ga_config.generations,
+            tournament_k=self.ga_config.tournament_k,
+            elitism=self.ga_config.elitism,
+            mutation_rate=self.ga_config.mutation_rate,
+            early_stop_generations=self.ga_config.early_stop_generations,
+            max_evaluations=min(
+                self.max_collect_evaluations,
+                self.ga_config.max_evaluations or self.max_collect_evaluations,
+            ),
+            initial_population=self.ga_config.initial_population,
+            seed=self.ga_config.seed,
+            workers=self.ga_config.workers,
+            islands=self.ga_config.islands,
+            migration_interval=self.ga_config.migration_interval,
+            migration_count=self.ga_config.migration_count,
+            restart_stagnation=self.ga_config.restart_stagnation,
+        )
         ga = GeneticOptimizer(
             param_space=ParamSpace(self.param_space),
             fitness_fn=self._fitness,
-            config=self.ga_config,
+            config=ga_config,
             constraints=self.constraints,
             batch_fitness_fn=(
-                self._batch_fitness if self.ga_config.workers > 1 else None
+                self._batch_fitness if ga_config.workers > 1 else None
             ),
+            collect_fn=self._collect_stage1,
+            stop_fn=self._collection_done,
         )
         try:
             report = ga.run()
@@ -325,126 +374,133 @@ class TestEngine:
                 self._pool = None
         t1 = time.time()
 
-        # Rank unique evaluated individuals by fitness; run the stages.
-        seen: dict[str, tuple[dict[str, Any], float]] = {}
-        for rec in report.history:
-            key = json.dumps(rec.params, sort_keys=True, default=str)
-            if key not in seen:
-                seen[key] = (rec.params, rec.fitness)
-
-        n_unique = len(seen)
-        print(f"=== Stage 1: GA (H1 train) ===")
+        print(f"=== Phase A: GA collection (H1 train) ===")
         print(f"  [TIMING] {t1-t0:.1f}s")
-        print(f"  [EVALS] {len(report.history)} evaluations, {n_unique} unique individuals")
+        print(f"  [EVALS] {len(report.history)} evaluations")
+        print(
+            f"  [COLLECTED] {len(self._collected)} / {self.collect_target} "
+            f"diverse H1-train survivors"
+        )
 
+        # Build PassingStrategy list from the collected set.
         passing: list[PassingStrategy] = []
-        stage_results: list[StageResult] = []
-
-        # Stage 2 + Stage 3: iterate over unique individuals.
-        t2_start = time.time()
-        for params, fit in sorted(
-            seen.values(), key=lambda t: t[1], reverse=True
-        ):
-            sr = StageResult(params=params, fitness=fit)
-
-            # Stage 1: H1 train gate.
-            htf_train = self._window_metrics(
-                self._evaluate_htf(params), self._train_start, self._train_end, self._htf_train.index
-            )
-            sr.htf_train = htf_train
-            sr.htf_train_pass, sr.htf_fail_reason = self._htf_train_check(
-                htf_train
-            )
-            if not sr.htf_train_pass:
-                stage_results.append(sr)
-                continue
-
-            # Stage 2: M1 confirmation (same train window).
-            m1_result = self._evaluate_m1_train(params)
-            m1_train = self._window_metrics(
-                m1_result, self._train_start, self._train_end, self._m1_train_index
-            )
-            sr.m1_train = m1_train
-            htf_pf = min(htf_train["profit_factor"], self.m1_pf_cap)
-            m1_pf = m1_train["profit_factor"]
-            sr.m1_confirm_pass = m1_pf >= self.m1_confirm_ratio * htf_pf
-            if not sr.m1_confirm_pass:
-                sr.m1_confirm_fail_reason = (
-                    f"m1_train profit_factor={m1_pf:.4f} < "
-                    f"{self.m1_confirm_ratio} * htf_pf={htf_pf:.4f}"
-                )
-                stage_results.append(sr)
-                continue
-
-            # Stage 3: M1 OOS gates (separate OOS1/OOS2 slices).
-            m1_oos1_result = self._evaluate_m1_oos1(params)
-            m1_oos1 = self._window_metrics(
-                m1_oos1_result, self._oos1_start, self._oos1_end, self._m1_oos1_index
-            )
-            m1_oos2_result = self._evaluate_m1_oos2(params)
-            m1_oos2 = self._window_metrics(
-                m1_oos2_result, self._oos2_start, self._oos2_end, self._m1_oos2_index
-            )
-            sr.m1_oos1 = m1_oos1
-            sr.m1_oos2 = m1_oos2
-            sr.m1_oos_pass, sr.m1_oos_fail_reason = self._m1_oos_check(
-                m1_oos1, m1_oos2
-            )
-            if not sr.m1_oos_pass:
-                stage_results.append(sr)
-                continue
-
-            # Full M1 run only for passing strategies (folder output).
-            full_result = self._evaluate_m1_full(params)
-            folder = self._save_strategy_folder(
-                full_result,
-                params,
-                len(passing),
-                htf_train,
-                m1_train,
-                m1_oos1,
-                m1_oos2,
-            )
-            sr.m1_oos_pass = True
-            stage_results.append(sr)
+        for params in self._collected:
+            key = json.dumps(params, sort_keys=True, default=str)
             passing.append(
                 PassingStrategy(
                     params=params,
-                    htf_train_metrics=htf_train,
-                    m1_train_metrics=m1_train,
-                    m1_oos1_metrics=m1_oos1,
-                    m1_oos2_metrics=m1_oos2,
-                    equity_curve_png=folder / "equity_curve.png",
+                    fitness=0.0,
+                    htf_train_metrics=self._collected_metrics.get(key),
                 )
             )
-        t3_end = time.time()
 
-        n1 = sum(1 for s in stage_results if s.htf_train_pass)
-        n2 = sum(1 for s in stage_results if s.m1_confirm_pass)
-        n3 = sum(1 for s in stage_results if s.m1_oos_pass)
+        summary_path = self._save_collection_summary(report, passing)
 
-        print(f"=== Stage 2: M1 confirm ===")
-        print(f"  [TIMING] {t3_end-t2_start:.1f}s")
-        print(f"  [PASSING] {n2} / {n1} passed M1 confirm")
-
-        print(f"=== Stage 3: M1 OOS ===")
-        print(f"  [TIMING] included in Stage 2 (same loop)")
-        print(f"  [PASSING] {n3} / {n2} passed M1 OOS")
-
-        summary_path = self._save_summary(report, passing)
-        stage_csvs = self._save_stage_csvs(stage_results)
-
-        print(f"=== Stages 1-3 Total ===")
-        print(f"  [TIMING] {time.time()-t_start:.1f}s")
-        print(f"  [PASSING] {len(passing)} strategies passed all 3 stages")
-        print(f"  [CSVs] {stage_csvs}")
+        print(f"  [SUMMARY] {summary_path}")
 
         return OptimizationResult(
             report=report,
             passing=passing,
-            stage_results=stage_results,
             summary_path=summary_path,
         )
+
+    def run_m1_funnel(
+        self, passing: list[PassingStrategy]
+    ) -> list[PassingStrategy]:
+        """Phase B (M1 part): M1-confirm + M1-OOS on Stage-1 survivors.
+
+        Returns the survivors that pass both M1 stages, with their stage
+        metrics attached. Real-time pass/fail printed per strategy.
+        """
+        if self._engine is None:
+            raise RuntimeError("call optimize() before run_m1_funnel()")
+
+        survivors: list[PassingStrategy] = []
+        for i, p in enumerate(passing):
+            # Stage 2: M1 confirmation (same train window).
+            m1_result = self._evaluate_m1_train(p.params)
+            m1_train = self._window_metrics(
+                m1_result, self._train_start, self._train_end, self._m1_train_index
+            )
+            p.m1_train_metrics = m1_train
+            m1_pf = m1_train["profit_factor"]
+            if m1_pf < self.m1_confirm_pf:
+                print(
+                    f"  [M1-CONFIRM] #{i} FAIL: m1_train pf={m1_pf:.4f} < "
+                    f"{self.m1_confirm_pf}"
+                )
+                continue
+            print(
+                f"  [M1-CONFIRM] #{i} PASS (pf={m1_pf:.4f}, n={m1_train['n_trades']})"
+            )
+
+            # Stage 3: M1 OOS gates (separate OOS1/OOS2 slices).
+            m1_oos1_result = self._evaluate_m1_oos1(p.params)
+            m1_oos1 = self._window_metrics(
+                m1_oos1_result, self._oos1_start, self._oos1_end, self._m1_oos1_index
+            )
+            m1_oos2_result = self._evaluate_m1_oos2(p.params)
+            m1_oos2 = self._window_metrics(
+                m1_oos2_result, self._oos2_start, self._oos2_end, self._m1_oos2_index
+            )
+            p.m1_oos1_metrics = m1_oos1
+            p.m1_oos2_metrics = m1_oos2
+            passed, reason = self._m1_oos_check(m1_oos1, m1_oos2)
+            if not passed:
+                print(f"  [M1-OOS] #{i} FAIL: {reason}")
+                continue
+            print(
+                f"  [M1-OOS] #{i} PASS "
+                f"(oos1 pf={m1_oos1['profit_factor']:.4f}, "
+                f"oos2 pf={m1_oos2['profit_factor']:.4f})"
+            )
+            survivors.append(p)
+
+        return survivors
+
+    # ------------------------------------------------------------------ #
+    # Phase A collection callbacks
+    # ------------------------------------------------------------------ #
+    def _collect_stage1(self, params: dict[str, Any], fitness: float) -> None:
+        """Called by the GA for each evaluated individual.
+
+        Adds `params` to the shared collected set if it passes the H1 train
+        gate AND is behaviorally diverse vs the already-collected set.
+        """
+        if len(self._collected) >= self.collect_target:
+            return
+        key = json.dumps(params, sort_keys=True, default=str)
+        if key in self._collected_keys:
+            return
+
+        # H1 train gate check (cached backtest).
+        wm = self._window_metrics(
+            self._evaluate_htf(params),
+            self._train_start,
+            self._train_end,
+            self._htf_train.index,
+        )
+        passed, reason = self._htf_train_check(wm)
+        if not passed:
+            return
+
+        # Behavioral diversity: must differ from EVERY collected strategy
+        # in at least `diversity_threshold` condition-slot genes.
+        for existing in self._collected:
+            if _condition_hamming(params, existing) < self.diversity_threshold:
+                return
+
+        self._collected.append(dict(params))
+        self._collected_keys.add(key)
+        self._collected_metrics[key] = wm
+        print(
+            f"  [COLLECT] {len(self._collected)}/{self.collect_target} "
+            f"diverse H1-train survivors"
+        )
+
+    def _collection_done(self) -> bool:
+        """Called by the GA to decide whether to stop collection."""
+        return len(self._collected) >= self.collect_target
 
     # ------------------------------------------------------------------ #
     # Data loading / timestamp split / slicing
@@ -483,11 +539,6 @@ class TestEngine:
         self._oos2_end = htf.index[-1]
 
         # Warmup: max lookback among lookback/period params (in days).
-        # The hour-aligned volume filter needs volume_lookback DAYS of prior
-        # same-hour bars, so warmup must be in days, not bars.
-        # A 365-day floor ensures the ADX/ATR ewm (infinite-memory recursive
-        # filters) have converged by the train start, so sliced metrics match
-        # full-range metrics to within floating-point noise.
         warmup_days = 0
         for name, s in self.param_space.items():
             if (
@@ -499,8 +550,7 @@ class TestEngine:
         warmup_days = max(warmup_days, 365) + 5
         warmup_td = pd.Timedelta(days=warmup_days)
         # Tail buffer past each window end so trades entered inside the
-        # window can close (a straddling trade would otherwise be counted
-        # as open/status=0 in the sliced run but closed in the full run).
+        # window can close.
         tail_td = pd.Timedelta(days=2)
 
         # Stage 1 + Stage 2: train window + warmup + tail.
@@ -540,12 +590,7 @@ class TestEngine:
     # Correctness guard: sliced vs full H1 train metrics
     # ------------------------------------------------------------------ #
     def _verify_slicing(self) -> None:
-        """Verify sliced-H1 train metrics match full-H1 train metrics.
-
-        Runs a few random param sets through both the full H1 series and the
-        warmup-sliced H1 series, and asserts the train-window metrics match.
-        This guards against the slicing changing indicator history.
-        """
+        """Verify sliced-H1 train metrics match full-H1 train metrics."""
         rng = random.Random(123)
         space = ParamSpace(self.param_space)
         samples = [space.random_individual(rng) for _ in range(2)]
@@ -570,19 +615,11 @@ class TestEngine:
                 self._htf_train.index,
             )
 
-            # Only metrics that drive pipeline decisions must match exactly.
-            # total_return_pct / avg_trade_pct are informational: a tiny
-            # ADX ewm drift at the slice boundary can shift one entry's
-            # fill price (same trade count, slightly different PnL) without
-            # affecting any gate or the fitness.
             for k in ("profit_factor", "n_trades", "win_rate", "trades_per_month"):
                 vf, vs = wm_full[k], wm_sliced[k]
                 if isinstance(vf, float) and isinstance(vs, float):
                     if math.isinf(vf) and math.isinf(vs):
                         continue
-                    # Relative tolerance: indicator drift at the slice
-                    # boundary is ~0.3%; a real warmup bug (missing warmup
-                    # -> NaN filters -> 0 entries) is >>10%.
                     tol = 1e-2 * max(1.0, abs(vf))
                     if abs(vf - vs) > tol:
                         raise RuntimeError(
@@ -595,7 +632,7 @@ class TestEngine:
         )
 
     # ------------------------------------------------------------------ #
-    # GA fitness (Stage 1: HTF train)
+    # GA fitness (Phase A: HTF train)
     # ------------------------------------------------------------------ #
     def _fitness(self, params: dict[str, Any]) -> float:
         """Fitness: criterion score on HTF-train-window closed trades."""
@@ -645,7 +682,7 @@ class TestEngine:
         return self._htf_cache[key]
 
     # ------------------------------------------------------------------ #
-    # M1 evaluations (sliced windows + full for PNG)
+    # M1 evaluations (sliced windows)
     # ------------------------------------------------------------------ #
     def _evaluate_m1_train(self, params: dict[str, Any]) -> BacktestResult:
         """M1 backtest on the train slice (Stage 2), cached."""
@@ -680,15 +717,6 @@ class TestEngine:
             )
         return self._m1_oos2_cache[key]
 
-    def _evaluate_m1_full(self, params: dict[str, Any]) -> BacktestResult:
-        """Full-range M1 backtest (only for passing strategies' PNG), cached."""
-        key = json.dumps(params, sort_keys=True, default=str)
-        if key not in self._m1_cache:
-            strategy = self.strategy_class(**params)
-            signals = strategy.generate(self._htf)
-            self._m1_cache[key] = self._engine.run(signals, self._htf)
-        return self._m1_cache[key]
-
     # ------------------------------------------------------------------ #
     # Window metrics (trades split by entry timestamp)
     # ------------------------------------------------------------------ #
@@ -707,10 +735,6 @@ class TestEngine:
     # ------------------------------------------------------------------ #
     # Pass gates
     # ------------------------------------------------------------------ #
-    def _htf_train_pass(self, wm: dict[str, float]) -> bool:
-        """Stage 1: H1 train gate (strictly greater than thresholds)."""
-        return self._htf_train_check(wm)[0]
-
     def _htf_train_check(
         self, wm: dict[str, float]
     ) -> tuple[bool, str | None]:
@@ -722,12 +746,6 @@ class TestEngine:
                     f"htf_train {metric}={val:.4f} <= {min_value}"
                 )
         return True, None
-
-    def _m1_oos_pass(
-        self, oos1: dict[str, float], oos2: dict[str, float]
-    ) -> bool:
-        """Stage 3: M1 OOS gates (strictly greater than thresholds)."""
-        return self._m1_oos_check(oos1, oos2)[0]
 
     def _m1_oos_check(
         self, oos1: dict[str, float], oos2: dict[str, float]
@@ -745,84 +763,35 @@ class TestEngine:
     # ------------------------------------------------------------------ #
     # Outputs
     # ------------------------------------------------------------------ #
-    def _save_strategy_folder(
-        self,
-        result: BacktestResult,
-        params: dict[str, Any],
-        index: int,
-        htf_train: dict[str, float],
-        m1_train: dict[str, float],
-        m1_oos1: dict[str, float],
-        m1_oos2: dict[str, float],
+    def _save_collection_summary(
+        self, report: GAReport, passing: list[PassingStrategy]
     ) -> Path:
-        """Write one folder per passing strategy.
-
-        Folder layout (results/strategy_<index>/):
-        - equity_curve.png  full-data equity curve, train region shaded
-        - trades.csv        full M1 trade records
-        - strategy.json     params + all stage metrics + full-run metrics
-        """
+        """Write a CSV of the collected Stage-1 survivors."""
         import csv
-        import json
 
-        import matplotlib
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        base = f"{self.strategy_name}_{self.symbol}_{self.timeframe}"
+        path = self.results_dir / f"{base}_stage1_collected.csv"
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
+        rows = []
+        for p in passing:
+            row = {}
+            for k, v in p.params.items():
+                row[f"param_{k}"] = v
+            for k, v in (p.htf_train_metrics or {}).items():
+                row[f"htf_train_{k}"] = v
+            rows.append(row)
 
-        folder = self.results_dir / f"strategy_{index}"
-        folder.mkdir(parents=True, exist_ok=True)
-
-        # Equity curve PNG (train region shaded).
-        png_path = folder / "equity_curve.png"
-        fig, ax = plt.subplots(figsize=(12, 6))
-        if len(result.equity_curve):
-            ax.plot(
-                result.equity_curve.index,
-                result.equity_curve.values,
-                lw=1.2,
-            )
-        ax.axvspan(
-            self._train_start,
-            self._train_end,
-            color="#ff7f0e",
-            alpha=0.15,
-            label="Train (in-sample)",
-        )
-        ax.set_title(
-            f"{self.strategy_name} {self.symbol} {self.timeframe} "
-            f"| params={params}"
-        )
-        ax.set_xlabel("Date")
-        ax.set_ylabel("Equity (USD)")
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best")
-        fig.tight_layout()
-        fig.savefig(png_path, dpi=150)
-        plt.close(fig)
-
-        # Trade records CSV.
-        trades_path = folder / "trades.csv"
-        if result.trades is not None and not result.trades.empty:
-            result.trades.to_csv(trades_path, index=False)
+        if rows:
+            fieldnames = list(rows[0].keys())
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
         else:
-            with open(trades_path, "w", newline="", encoding="utf-8") as f:
-                f.write("no_trades\n")
-
-        # Params + stage metrics + full-run metrics JSON.
-        strategy_path = folder / "strategy.json"
-        data = {
-            "params": self._jsonable(params),
-            "htf_train": self._jsonable(htf_train),
-            "m1_train": self._jsonable(m1_train),
-            "m1_oos1": self._jsonable(m1_oos1),
-            "m1_oos2": self._jsonable(m1_oos2),
-            "full_run_metrics": self._jsonable(result.metrics),
-        }
-        with open(strategy_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-
-        return folder
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                f.write("no_collected\n")
+        return path
 
     @staticmethod
     def _jsonable(value: Any) -> Any:
@@ -836,125 +805,3 @@ class TestEngine:
         ):
             return None
         return value
-
-    def _save_summary(
-        self, report: GAReport, passing: list[PassingStrategy]
-    ) -> Path:
-        """Write the optimization summary JSON (passing strategies only)."""
-        self.results_dir.mkdir(parents=True, exist_ok=True)
-        path = self.results_dir / (
-            f"{self.strategy_name}_{self.symbol}_{self.timeframe}"
-            f"_optimization_summary.json"
-        )
-        data = {
-            "strategy": self.strategy_class.__name__,
-            "symbol": self.symbol,
-            "timeframe": self.timeframe,
-            "split": list(self.split),
-            "start": str(self._oos1_start.date()),
-            "end": str(self._oos2_end.date()),
-            "n_evaluations": len(report.history),
-            "best_fitness": (
-                None if report.best is None else report.best.fitness
-            ),
-            "n_passing": len(passing),
-            "passing_strategies": [
-                {
-                    "params": self._jsonable(p.params),
-                    "htf_train": self._jsonable(p.htf_train_metrics),
-                    "m1_train": self._jsonable(p.m1_train_metrics),
-                    "m1_oos1": self._jsonable(p.m1_oos1_metrics),
-                    "m1_oos2": self._jsonable(p.m1_oos2_metrics),
-                    "equity_curve_png": (
-                        str(p.equity_curve_png)
-                        if p.equity_curve_png
-                        else None
-                    ),
-                }
-                for p in passing
-            ],
-        }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        return path
-
-    def _save_stage_csvs(
-        self, stage_results: list[StageResult]
-    ) -> list[Path]:
-        """Write per-stage CSVs so you can see where strategies are dropped.
-
-        - stage1_htf_train.csv: every unique eval + H1 train metrics + pass
-        - stage2_m1_confirm.csv: Stage-1 survivors + M1 train metrics + pass
-        - stage3_m1_oos.csv:     Stage-2 survivors + M1 OOS metrics + pass
-        """
-        import csv
-
-        self.results_dir.mkdir(parents=True, exist_ok=True)
-        base = (
-            f"{self.strategy_name}_{self.symbol}_{self.timeframe}"
-        )
-        paths: list[Path] = []
-
-        def _write(
-            name: str, rows: list[dict[str, Any]]
-        ) -> Path:
-            p = self.results_dir / f"{base}_{name}.csv"
-            if rows:
-                fieldnames = list(rows[0].keys())
-                with open(p, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    writer.writerows(rows)
-            else:
-                with open(p, "w", newline="", encoding="utf-8") as f:
-                    f.write("no_rows\n")
-            return p
-
-        # Stage 1: all unique evals.
-        s1_rows = []
-        for sr in stage_results:
-            row = {"fitness": sr.fitness}
-            for k, v in sr.params.items():
-                row[f"param_{k}"] = v
-            for k, v in (sr.htf_train or {}).items():
-                row[f"htf_train_{k}"] = v
-            row["pass"] = sr.htf_train_pass
-            row["fail_reason"] = sr.htf_fail_reason or ""
-            s1_rows.append(row)
-        paths.append(_write("stage1_htf_train", s1_rows))
-
-        # Stage 2: Stage-1 survivors.
-        s2_rows = []
-        for sr in stage_results:
-            if not sr.htf_train_pass:
-                continue
-            row = {"fitness": sr.fitness}
-            for k, v in sr.params.items():
-                row[f"param_{k}"] = v
-            for k, v in (sr.htf_train or {}).items():
-                row[f"htf_train_{k}"] = v
-            for k, v in (sr.m1_train or {}).items():
-                row[f"m1_train_{k}"] = v
-            row["pass"] = sr.m1_confirm_pass
-            row["fail_reason"] = sr.m1_confirm_fail_reason or ""
-            s2_rows.append(row)
-        paths.append(_write("stage2_m1_confirm", s2_rows))
-
-        # Stage 3: Stage-2 survivors.
-        s3_rows = []
-        for sr in stage_results:
-            if not sr.m1_confirm_pass:
-                continue
-            row = {"fitness": sr.fitness}
-            for k, v in sr.params.items():
-                row[f"param_{k}"] = v
-            for k, v in (sr.m1_oos1 or {}).items():
-                row[f"m1_oos1_{k}"] = v
-            for k, v in (sr.m1_oos2 or {}).items():
-                row[f"m1_oos2_{k}"] = v
-            row["pass"] = sr.m1_oos_pass
-            row["fail_reason"] = sr.m1_oos_fail_reason or ""
-            s3_rows.append(row)
-        paths.append(_write("stage3_m1_oos", s3_rows))
-
-        return paths

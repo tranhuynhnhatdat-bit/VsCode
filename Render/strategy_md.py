@@ -97,6 +97,15 @@ def render_strategy_md(
             f"{_fmt(m.get('n_trades'))} | {_fmt(m.get('trades_per_month'))} | "
             f"{_fmt(m.get('win_rate'))} |"
         )
+    # Optional event-driven (Stage 4) row, if present.
+    event_m = metrics_map.get("event")
+    if event_m:
+        perf_rows.append(
+            f"| Event (Stage 4) | {_fmt(event_m.get('profit_factor'))} | "
+            f"{_fmt(event_m.get('n_trades'))} | "
+            f"{_fmt(event_m.get('trades_per_month', 'n/a'))} | "
+            f"{_fmt(event_m.get('win_rate'))} |"
+        )
     perf_md = "\n".join(perf_rows)
 
     entry_fill = strat.entry_hour + 1  # H1 signal -> M1 fill at +1h

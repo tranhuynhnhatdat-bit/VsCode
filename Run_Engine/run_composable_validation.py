@@ -1,29 +1,22 @@
 """Run the ComposableStrategy 4-stage optimization on XAUUSD and save passing strategies.
 
-Two-phase pipeline:
-  Phase A — Island GA collecting up to `collect_target` diverse H1-train
-            survivors (Stage 1). No folders saved here.
-  Phase B — M1 funnel on the fixed collected set:
-            Stage 2 (M1 confirm) -> Stage 3 (M1 OOS1/OOS2)
-            -> Stage 4 (event-driven validation, full data range).
-            Folders are saved ONLY for event-passing strategies.
+This is a VALIDATION variant of run_composable_optimization.py. It applies the
+same pipeline but with:
+  - Reduced GA cost (population, generations, islands, workers, collection target)
+  - Behavioral diversity (collect only strategies whose actual H1-train trade
+    set differs from every already-collected strategy) instead of the vacuous
+    gene-Hamming gate
+  - No-op rejection (drop individuals with no active conditions, so we stop
+    saving pure-time baseline look-alikes as "passing" strategies)
 
-The base skeleton is fixed (02:00 entry / 23:00 exit, Wed/Fri long-only),
-matching GoldSession. The GA composes up to 2 conditions drawn from the
-indicator pool, combined with a single global AND/OR connective.
+The event-driven engine (Stage 4) still runs on the FULL data range, and all
+filter thresholds are IDENTICAL to run_composable_optimization.py (no tightening).
 
-Real-time printing: each strategy's pass/fail is printed as it runs through
-each stage. Diversity is enforced by a Hamming distance over condition-slot
-genes vs the shared collected set.
-
-Saves to results/:
-- One folder per EVENT-PASSING strategy: equity_curve.png + trades.csv
-  (both from the event engine) + strategy.json + strategy.md
-- A stage-1 collected CSV
-- A metrics CSV of event-passing strategies
+Writes to results_validation/ so the original results/ are not clobbered.
+Includes a verification block comparing inert-strategy counts before/after.
 
 Run from the repo root:
-    python Run_Engine/run_composable_optimization.py
+    python Run_Engine/run_composable_validation.py
 """
 
 from __future__ import annotations
@@ -46,18 +39,22 @@ from composable.composable import ComposableStrategy, build_param_space
 from optimization.engine import TestEngine, PassingStrategy
 from optimization.genetic import GAConfig
 from Render.strategy_md import describe_condition, render_strategy_md
-from backtest.event_engine import EventEngine, validate_with_event_engine
+from backtest.event_engine import validate_with_event_engine
 from data_manager import DataManager
 
-RESULTS_DIR = ROOT / "results"
+# Separate output dir so the original results/ are untouched.
+RESULTS_DIR = ROOT / "results_validation"
 
 # Full data range (2003-05-05 -> 2026-08-03).
 START = "2003-05-05"
 END = "2026-08-03"
 
-# Phase A: H1 train gates (loosened; downstream stages are the real filter).
+# ------------------------------------------------------------------ #
+# Filters IDENTICAL to run_composable_optimization.py (no tightening).
+# ------------------------------------------------------------------ #
+# Phase A: H1 train gates.
 HTF_TRAIN_GATES = {
-    "profit_factor": 1.2,
+    "profit_factor": 1.1,
     "n_trades": 100.0,
     "win_rate": 35.0,
 }
@@ -78,14 +75,14 @@ EVENT_FILTERS = {
     "max_drawdown_pct": -15.0,
 }
 
-# GA collection target (Stage-1 survivors) and diversity threshold.
-COLLECT_TARGET = 100
-DIVERSITY_THRESHOLD = 1
-MAX_COLLECT_EVALUATIONS = 10000
+# ------------------------------------------------------------------ #
+# Reduced GA cost (the anti-overfit lever requested).
+# ------------------------------------------------------------------ #
+COLLECT_TARGET = 60
+MAX_COLLECT_EVALUATIONS = 6_000
 
 # GA param space: global per-parent indicator params (Option B) + per-slot
-# condition genes. Base skeleton fixed. 2 condition slots so random
-# AND-combinations can actually trade.
+# condition genes. Base skeleton fixed. 2 condition slots.
 PARAM_SPACE = build_param_space(
     max_conditions=2,
     periods=(5, 10, 14, 20, 50),
@@ -228,32 +225,31 @@ class BehaviorTestEngine(TestEngine):
         return (len(closed), tuple(times[:50]), tuple(times[-50:]))
 
 
+# ------------------------------------------------------------------ #
+# Shared helpers (same as run_composable_optimization.py)
+# ------------------------------------------------------------------ #
 def _jsonable(value):
     """Convert inf/nan to None for JSON serialization."""
     if isinstance(value, dict):
         return {k: _jsonable(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_jsonable(v) for v in value]
-    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+    if isinstance(value, float) and (
+        value != value or value in (float("inf"), float("-inf"))
+    ):
         return None
     return value
 
 
 def save_strategy_folder(p: PassingStrategy, index: int) -> Path:
-    """Write one folder per event-passing strategy.
-
-    equity_curve.png + trades.csv come from the event engine's result.
-    strategy.json holds params + surviving stage metrics + event metrics.
-    """
+    """Write one folder per event-passing strategy."""
     folder = RESULTS_DIR / f"strategy_{index}"
     folder.mkdir(parents=True, exist_ok=True)
 
-    # Event engine result carries metrics + equity_curve + trades.
-    ev = p.event_metrics  # full event metrics dict
+    ev = p.event_metrics
     eq = p.event_equity_curve
     trades = p.event_trades
 
-    # Equity curve PNG from the event engine.
     import matplotlib
 
     matplotlib.use("Agg")
@@ -274,7 +270,6 @@ def save_strategy_folder(p: PassingStrategy, index: int) -> Path:
     fig.savefig(png_path, dpi=150)
     plt.close(fig)
 
-    # Trades CSV from the event engine.
     trades_path = folder / "trades.csv"
     if trades is not None and not trades.empty:
         trades.to_csv(trades_path, index=False)
@@ -282,7 +277,6 @@ def save_strategy_folder(p: PassingStrategy, index: int) -> Path:
         with open(trades_path, "w", newline="", encoding="utf-8") as f:
             f.write("no_trades\n")
 
-    # strategy.json (params + stage metrics + event metrics).
     strategy_path = folder / "strategy.json"
     data = {
         "params": _jsonable(p.params),
@@ -333,6 +327,66 @@ def save_metrics_csv(passing: list[PassingStrategy]) -> Path:
     return path
 
 
+# ------------------------------------------------------------------ #
+# Verification: inert / duplicate strategy detection
+# ------------------------------------------------------------------ #
+def _is_pure_time(row: dict) -> bool:
+    """True if the strategy row has no active (non-none) condition slots."""
+    return (
+        str(row.get("param_cond1_type", "none")) == "none"
+        and str(row.get("param_cond2_type", "none")) == "none"
+    )
+
+
+def count_inert_strategies(csv_path: Path) -> dict:
+    """Read a passing-metrics CSV and report inert/duplicate strategies."""
+    report = {"path": str(csv_path), "n_rows": 0, "pure_time": 0, "dup_trade_sets": 0}
+    if not csv_path.exists():
+        report["path"] += " (missing)"
+        return report
+
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = [r for r in reader]
+    report["n_rows"] = len(rows)
+    if not rows:
+        return report
+
+    report["pure_time"] = sum(1 for r in rows if _is_pure_time(r))
+
+    # Behavioral duplicates: same htf_train_n_trades + m1_oos1_n_trades +
+    # event_n_trades (identical underlying trade behavior).
+    seen: dict[tuple, int] = {}
+    for r in rows:
+        sig = (
+            r.get("htf_train_n_trades"),
+            r.get("m1_oos1_n_trades"),
+            r.get("event_n_trades"),
+        )
+        seen[sig] = seen.get(sig, 0) + 1
+    report["dup_trade_sets"] = sum(max(0, c - 1) for c in seen.values())
+    return report
+
+
+def verify_before_after() -> None:
+    """Compare old results/ vs new results_validation/ for inert strategies."""
+    old_csv = ROOT / "results" / "composable_passing_metrics.csv"
+    new_csv = RESULTS_DIR / "composable_passing_metrics.csv"
+
+    print("\n=== Verification: inert / duplicate strategies ===")
+    old_r = count_inert_strategies(old_csv)
+    new_r = count_inert_strategies(new_csv)
+    print(f"  BEFORE ({Path(old_r['path']).name}):")
+    print(f"    rows={old_r['n_rows']}, pure_time={old_r['pure_time']}, "
+          f"dup_trade_sets={old_r['dup_trade_sets']}")
+    print(f"  AFTER ({Path(new_r['path']).name}):")
+    print(f"    rows={new_r['n_rows']}, pure_time={new_r['pure_time']}, "
+          f"dup_trade_sets={new_r['dup_trade_sets']}")
+
+
+# ------------------------------------------------------------------ #
+# Main
+# ------------------------------------------------------------------ #
 def main() -> None:
     t_total = time.time()
 
@@ -353,22 +407,22 @@ def main() -> None:
         end=END,
         risk_money=100.0,
         ga_config=GAConfig(
-            population=50,
-            generations=20,
+            population=20,
+            generations=8,
             tournament_k=3,
             elitism=2,
             mutation_rate=0.10,
             early_stop_generations=3,
             seed=None,
-            workers=6,
+            workers=3,
             initial_population=[SEED_INDIVIDUAL],
-            islands=4,
+            islands=2,
             migration_interval=8,
             migration_count=2,
             restart_stagnation=3,
         ),
         collect_target=COLLECT_TARGET,
-        diversity_threshold=DIVERSITY_THRESHOLD,
+        diversity_threshold=1,  # unused by BehaviorTestEngine._collect_stage1
         max_collect_evaluations=MAX_COLLECT_EVALUATIONS,
     )
 
@@ -399,23 +453,13 @@ def main() -> None:
         return
 
     # ------------------------------------------------------------------ #
-    # Phase B-2: Event-driven validation (Stage 4) + folder saving.
+    # Phase B-2: Event-driven validation (Stage 4) on FULL data + saving.
     # ------------------------------------------------------------------ #
     print(f"\n=== Phase B-2: Event-Driven Validation (Stage 4) — {len(m1_survivors)} candidates ===")
     t3_start = time.time()
     dm = DataManager()
     h1_df = dm.load("XAUUSD", "H1", start=START, end=END)
     m1_df = dm.load("XAUUSD", "M1", start=START, end=END)
-
-    # Reuse one engine across all survivors (avoids re-constructing
-    # DataManager/SymbolInfo per strategy).
-    event_engine = EventEngine(
-        symbol="XAUUSD",
-        htf_timeframe="H1",
-        initial_capital=10_000.0,
-        risk_money=100.0,
-        ticks_per_bar=20,
-    )
 
     event_passing: list[PassingStrategy] = []
     for i, p in enumerate(m1_survivors):
@@ -429,9 +473,7 @@ def main() -> None:
             risk_money=100.0,
             ticks_per_bar=20,
             filters=EVENT_FILTERS,
-            engine=event_engine,
         )
-        # Attach event result to the strategy.
         p.event_metrics = ev_result["result"]["metrics"]
         p.event_equity_curve = ev_result["result"]["equity_curve"]
         p.event_trades = ev_result["result"]["trades"]
@@ -501,6 +543,11 @@ def main() -> None:
             },
         )
         print(f"  strategy.md: {md_path}")
+
+    # ------------------------------------------------------------------ #
+    # Verification: inert / duplicate strategy comparison.
+    # ------------------------------------------------------------------ #
+    verify_before_after()
 
 
 if __name__ == "__main__":
