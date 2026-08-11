@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 # Absolute path to the data directory (hardcoded to prevent errors).
-DATA_DIR = Path(r"C:\Users\DAT\Desktop\VsCode\Data")
+DATA_DIR = Path(r"C:\Users\DAT\Desktop\Strategy_Factory\Data")
 # Single JSON file holding symbol info for all symbols.
 SYMBOL_INFO_PATH = DATA_DIR / "symbol_info.json"
 
