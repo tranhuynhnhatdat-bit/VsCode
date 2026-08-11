@@ -20,12 +20,18 @@ Scale model (single source of truth):
     * ind_ind     : indicator vs indicator, both sides SAME scale
 - Thresholds are only meaningful for oscillator-scale indicators; the
   per-indicator threshold range is used for validation and rendering.
+
+The indicator line registry (``INDICATOR_REGISTRY``) is the single source of
+truth for every selectable line: its parent, scale, threshold range, the
+global GA param keys that feed it, and the compute callable that produces its
+series. ``conditions.py``, ``composable.py``, and the GA param space all
+derive from it — add a new indicator line here and nowhere else.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -65,38 +71,6 @@ CONDITION_TYPES = (
     TYPE_IND_IND,
 )
 
-# Indicator registry: line_name -> (parent, scale, threshold_range_or_None).
-# threshold_range is the set of legal constant thresholds for oscillator-scale
-# indicators (used for validation + rendering). None = no threshold allowed.
-INDICATOR_REGISTRY: dict[str, tuple[str, str, tuple[float, ...] | None]] = {
-    "SMA": ("SMA", SCALE_PRICE, None),
-    "EMA": ("EMA", SCALE_PRICE, None),
-    "ATR": ("ATR", SCALE_DISTANCE, None),
-    "RSI": ("RSI", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0)),
-    "CCI": ("CCI", SCALE_OSCILLATOR, (-200.0, -100.0, 100.0, 200.0)),
-    "Stoch_K": ("Stochastic", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0)),
-    "Stoch_D": ("Stochastic", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0)),
-    "ADX": ("ADX", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0)),
-    "PlusDI": ("ADX", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0)),
-    "MinusDI": ("ADX", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0)),
-    "BB_Upper": ("Bollinger", SCALE_PRICE, None),
-    "BB_Lower": ("Bollinger", SCALE_PRICE, None),
-    "MACD_Main": ("MACD", SCALE_DISTANCE, None),
-    "MACD_Signal": ("MACD", SCALE_DISTANCE, None),
-    "Momentum": ("Momentum", SCALE_OSCILLATOR, (-100.0, -50.0, 0.0, 50.0, 100.0)),
-    "WPR": ("WPR", SCALE_OSCILLATOR, (-80.0, -50.0, -20.0)),
-    "MFI": ("MFI", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0)),
-    "OBV": ("OBV", SCALE_DISTANCE, None),
-    "Tenkan": ("Ichimoku", SCALE_PRICE, None),
-    "Kijun": ("Ichimoku", SCALE_PRICE, None),
-    "SenkouA": ("Ichimoku", SCALE_PRICE, None),
-    "SenkouB": ("Ichimoku", SCALE_PRICE, None),
-    "Chikou": ("Ichimoku", SCALE_PRICE, None),
-}
-
-# The set of indicator line names the GA can choose from.
-INDICATOR_NAMES = tuple(INDICATOR_REGISTRY.keys())
-
 # Operator choices for the GA.
 OP_CHOICES = ("gt", "lt", "crosses_above", "crosses_below")
 
@@ -104,6 +78,308 @@ OP_CHOICES = ("gt", "lt", "crosses_above", "crosses_below")
 NONE = "none"
 
 
+# ------------------------------------------------------------------ #
+# Indicator line registry (single source of truth)
+# ------------------------------------------------------------------ #
+@dataclass(frozen=True)
+class IndicatorSpec:
+    """One selectable indicator line's full specification.
+
+    This is the single source of truth for everything a line needs across
+    the codebase:
+
+    - ``name``: line name used in condition genes / operands.
+    - ``parent``: owning indicator (SMA, RSI, Stochastic, ...).
+    - ``scale``: price / oscillator / distance (drives condition legality).
+    - ``threshold``: legal constant thresholds for oscillator-scale lines,
+      or None if a constant threshold is meaningless for this line.
+    - ``period_key`` / ``param2_key``: the global GA param keys that feed
+      this line's period and second parameter (None if the line has no such
+      param). OBV has neither.
+    - ``compute``: callable(df, period, param2) -> Series for this single
+      line. Multi-line indicators (Stochastic, Bollinger, MACD, Ichimoku)
+      each get a thin wrapper that calls the shared function and returns the
+      requested line.
+    """
+
+    name: str
+    parent: str
+    scale: str
+    threshold: tuple[float, ...] | None
+    period_key: str | None
+    param2_key: str | None
+    compute: Callable[[pd.DataFrame, int | None, int | None], pd.Series]
+
+
+def _sma(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.SMA(df["Close"], period)
+
+
+def _ema(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.EMA(df["Close"], period)
+
+
+def _atr(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.ATR(df, period)
+
+
+def _rsi(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.RSI(df, period)
+
+
+def _cci(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.CCI(df, period)
+
+
+def _stoch_k(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    k, _d = ind.Stochastic(df, k_period=period, d_period=param2 or 3)
+    return k
+
+
+def _stoch_d(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    k, d = ind.Stochastic(df, k_period=period, d_period=param2 or 3)
+    return d
+
+
+def _adx(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.ADX(df, period)
+
+
+def _plusdi(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.PlusDI(df, period)
+
+
+def _minusdi(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.MinusDI(df, period)
+
+
+def _bb_upper(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    upper, _lower = ind.Bollinger(df, period, param2 or 2.0)
+    return upper
+
+
+def _bb_lower(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    _upper, lower = ind.Bollinger(df, period, param2 or 2.0)
+    return lower
+
+
+def _macd_main(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    main, _sig = ind.MACD(df, period, param2 or 26)
+    return main
+
+
+def _macd_signal(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    _main, sig = ind.MACD(df, period, param2 or 26)
+    return sig
+
+
+def _momentum(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.Momentum(df, period)
+
+
+def _wpr(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.WPR(df, period)
+
+
+def _mfi(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.MFI(df, period)
+
+
+def _obv(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return ind.OBV(df)
+
+
+def _ichimoku_line(
+    df: pd.DataFrame, period: int | None, param2: int | None, which: int
+) -> pd.Series:
+    t, k, a, b, c = ind.Ichimoku(df, period, param2 or 26, 52)
+    return (t, k, a, b, c)[which]
+
+
+def _tenkan(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return _ichimoku_line(df, period, param2, 0)
+
+
+def _kijun(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return _ichimoku_line(df, period, param2, 1)
+
+
+def _senkou_a(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return _ichimoku_line(df, period, param2, 2)
+
+
+def _senkou_b(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return _ichimoku_line(df, period, param2, 3)
+
+
+def _chikou(df: pd.DataFrame, period: int | None, param2: int | None = None):
+    return _ichimoku_line(df, period, param2, 4)
+
+
+# line_name -> IndicatorSpec. Add a new indicator line here ONLY.
+INDICATOR_REGISTRY: dict[str, IndicatorSpec] = {
+    "SMA": IndicatorSpec("SMA", "SMA", SCALE_PRICE, None, "sma_period", None, _sma),
+    "EMA": IndicatorSpec("EMA", "EMA", SCALE_PRICE, None, "ema_period", None, _ema),
+    "ATR": IndicatorSpec("ATR", "ATR", SCALE_DISTANCE, None, "atr_period", None, _atr),
+    "RSI": IndicatorSpec(
+        "RSI", "RSI", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0),
+        "rsi_period", None, _rsi,
+    ),
+    "CCI": IndicatorSpec(
+        "CCI", "CCI", SCALE_OSCILLATOR, (-200.0, -100.0, 100.0, 200.0),
+        "cci_period", None, _cci,
+    ),
+    "Stoch_K": IndicatorSpec(
+        "Stoch_K", "Stochastic", SCALE_OSCILLATOR,
+        (20.0, 30.0, 50.0, 70.0, 80.0), "stoch_k", "stoch_d", _stoch_k,
+    ),
+    "Stoch_D": IndicatorSpec(
+        "Stoch_D", "Stochastic", SCALE_OSCILLATOR,
+        (20.0, 30.0, 50.0, 70.0, 80.0), "stoch_k", "stoch_d", _stoch_d,
+    ),
+    "ADX": IndicatorSpec(
+        "ADX", "ADX", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0),
+        "adx_period", None, _adx,
+    ),
+    "PlusDI": IndicatorSpec(
+        "PlusDI", "ADX", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0),
+        "adx_period", None, _plusdi,
+    ),
+    "MinusDI": IndicatorSpec(
+        "MinusDI", "ADX", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0),
+        "adx_period", None, _minusdi,
+    ),
+    "BB_Upper": IndicatorSpec(
+        "BB_Upper", "Bollinger", SCALE_PRICE, None, "bb_period", "bb_stddev",
+        _bb_upper,
+    ),
+    "BB_Lower": IndicatorSpec(
+        "BB_Lower", "Bollinger", SCALE_PRICE, None, "bb_period", "bb_stddev",
+        _bb_lower,
+    ),
+    "MACD_Main": IndicatorSpec(
+        "MACD_Main", "MACD", SCALE_DISTANCE, None, "macd_fast", "macd_slow",
+        _macd_main,
+    ),
+    "MACD_Signal": IndicatorSpec(
+        "MACD_Signal", "MACD", SCALE_DISTANCE, None, "macd_fast", "macd_slow",
+        _macd_signal,
+    ),
+    "Momentum": IndicatorSpec(
+        "Momentum", "Momentum", SCALE_OSCILLATOR,
+        (-100.0, -50.0, 0.0, 50.0, 100.0), "mom_period", None, _momentum,
+    ),
+    "WPR": IndicatorSpec(
+        "WPR", "WPR", SCALE_OSCILLATOR, (-80.0, -50.0, -20.0),
+        "wpr_period", None, _wpr,
+    ),
+    "MFI": IndicatorSpec(
+        "MFI", "MFI", SCALE_OSCILLATOR, (20.0, 30.0, 50.0, 70.0, 80.0),
+        "mfi_period", None, _mfi,
+    ),
+    "OBV": IndicatorSpec(
+        "OBV", "OBV", SCALE_DISTANCE, None, None, None, _obv,
+    ),
+    "Tenkan": IndicatorSpec(
+        "Tenkan", "Ichimoku", SCALE_PRICE, None, "ichi_tenkan", "ichi_kijun",
+        _tenkan,
+    ),
+    "Kijun": IndicatorSpec(
+        "Kijun", "Ichimoku", SCALE_PRICE, None, "ichi_tenkan", "ichi_kijun",
+        _kijun,
+    ),
+    "SenkouA": IndicatorSpec(
+        "SenkouA", "Ichimoku", SCALE_PRICE, None, "ichi_tenkan", "ichi_kijun",
+        _senkou_a,
+    ),
+    "SenkouB": IndicatorSpec(
+        "SenkouB", "Ichimoku", SCALE_PRICE, None, "ichi_tenkan", "ichi_kijun",
+        _senkou_b,
+    ),
+    "Chikou": IndicatorSpec(
+        "Chikou", "Ichimoku", SCALE_PRICE, None, "ichi_tenkan", "ichi_kijun",
+        _chikou,
+    ),
+}
+
+# The set of indicator line names the GA can choose from.
+INDICATOR_NAMES = tuple(INDICATOR_REGISTRY.keys())
+
+# Global GA param keys that exist in the param space but are not consumed by
+# any single line's period/param2 (reserved for future wiring). Kept next to
+# the registry so the global-param-key set stays in one place.
+EXTRA_GLOBAL_PARAM_KEYS = frozenset({"stoch_slowing", "ichi_senkou"})
+
+
+def build_parent_params() -> dict[str, tuple[str | None, str | None]]:
+    """parent -> (period_key, param2_key), derived from the registry."""
+    out: dict[str, tuple[str | None, str | None]] = {}
+    for spec in INDICATOR_REGISTRY.values():
+        if spec.parent not in out:
+            out[spec.parent] = (spec.period_key, spec.param2_key)
+    return out
+
+
+def build_global_param_keys() -> set[str]:
+    """All global GA param keys (period/param2 across lines + extras)."""
+    keys = set(EXTRA_GLOBAL_PARAM_KEYS)
+    for spec in INDICATOR_REGISTRY.values():
+        if spec.period_key:
+            keys.add(spec.period_key)
+        if spec.param2_key:
+            keys.add(spec.param2_key)
+    return keys
+
+
+# ------------------------------------------------------------------ #
+# Condition-slot gene layout (single source of truth)
+# ------------------------------------------------------------------ #
+# The per-slot fields that make up a condition's GA genes. Both the GA
+# param space (build_param_space) and the optimizer's behavioral-diversity
+# signature (CONDITION_GENES) derive the slot gene names from this list, so
+# the layout lives in exactly one place.
+CONDITION_GENE_FIELDS = (
+    "type", "op", "ind", "ind2", "price", "price2", "threshold",
+)
+
+
+def condition_gene_names(max_conditions: int) -> tuple[str, ...]:
+    """All condition-slot gene names for `max_conditions` slots.
+
+    e.g. max_conditions=2 ->
+      cond1_type, cond1_op, ..., cond2_type, ..., cond2_threshold
+    """
+    names: list[str] = []
+    for i in range(1, max_conditions + 1):
+        prefix = f"cond{i}_"
+        for f in CONDITION_GENE_FIELDS:
+            names.append(f"{prefix}{f}")
+    return tuple(names)
+
+
+def _indicator_series(
+    df: pd.DataFrame,
+    name: str | None,
+    period: int | None,
+    param2: int | None = None,
+) -> pd.Series:
+    """Compute a single indicator line series by name (data-driven).
+
+    Multi-line indicators return the requested line; shared params are read
+    from `period` / `param2` (the GA's global per-parent params).
+    """
+    if name is None:
+        raise ValueError("indicator operand requires a name")
+    try:
+        spec = INDICATOR_REGISTRY[name]
+    except KeyError:
+        raise ValueError(f"Unknown indicator: {name!r}") from None
+    return spec.compute(df, period, param2)
+
+
+# ------------------------------------------------------------------ #
+# Operands and conditions
+# ------------------------------------------------------------------ #
 @dataclass
 class Operand:
     """One side of a condition expression.
@@ -197,82 +473,6 @@ def indicator(
 
 
 # ------------------------------------------------------------------ #
-# Indicator value series
-# ------------------------------------------------------------------ #
-def _indicator_series(
-    df: pd.DataFrame,
-    name: str | None,
-    period: int | None,
-    param2: int | None = None,
-) -> pd.Series:
-    """Compute a single indicator line series by name.
-
-    Multi-line indicators return the requested line; shared params are read
-    from `period` / `param2` (the GA's global per-parent params).
-    """
-    if name is None:
-        raise ValueError("indicator operand requires a name")
-    if name == "SMA":
-        return ind.SMA(df["Close"], period)
-    if name == "EMA":
-        return ind.EMA(df["Close"], period)
-    if name == "ATR":
-        return ind.ATR(df, period)
-    if name == "RSI":
-        return ind.RSI(df, period)
-    if name == "CCI":
-        return ind.CCI(df, period)
-    if name == "Stoch_K":
-        k, _d = ind.Stochastic(df, k_period=period, d_period=param2 or 3)
-        return k
-    if name == "Stoch_D":
-        k, d = ind.Stochastic(df, k_period=period, d_period=param2 or 3)
-        return d
-    if name == "ADX":
-        return ind.ADX(df, period)
-    if name == "PlusDI":
-        return ind.PlusDI(df, period)
-    if name == "MinusDI":
-        return ind.MinusDI(df, period)
-    if name == "BB_Upper":
-        upper, _lower = ind.Bollinger(df, period, param2 or 2.0)
-        return upper
-    if name == "BB_Lower":
-        _upper, lower = ind.Bollinger(df, period, param2 or 2.0)
-        return lower
-    if name == "MACD_Main":
-        main, _sig = ind.MACD(df, period, param2 or 26)
-        return main
-    if name == "MACD_Signal":
-        _main, sig = ind.MACD(df, period, param2 or 26)
-        return sig
-    if name == "Momentum":
-        return ind.Momentum(df, period)
-    if name == "WPR":
-        return ind.WPR(df, period)
-    if name == "MFI":
-        return ind.MFI(df, period)
-    if name == "OBV":
-        return ind.OBV(df)
-    if name == "Tenkan":
-        t, _k, _a, _b, _c = ind.Ichimoku(df, period, param2 or 26, 52)
-        return t
-    if name == "Kijun":
-        _t, k, _a, _b, _c = ind.Ichimoku(df, period, param2 or 26, 52)
-        return k
-    if name == "SenkouA":
-        _t, _k, a, _b, _c = ind.Ichimoku(df, period, param2 or 26, 52)
-        return a
-    if name == "SenkouB":
-        _t, _k, _a, b, _c = ind.Ichimoku(df, period, param2 or 26, 52)
-        return b
-    if name == "Chikou":
-        _t, _k, _a, _b, c = ind.Ichimoku(df, period, param2 or 26, 52)
-        return c
-    raise ValueError(f"Unknown indicator: {name!r}")
-
-
-# ------------------------------------------------------------------ #
 # GA gene expansion
 # ------------------------------------------------------------------ #
 def condition_from_genes(
@@ -310,7 +510,7 @@ def condition_from_genes(
         # price [op] price-scale indicator
         if ind_name not in INDICATOR_REGISTRY:
             return None
-        if INDICATOR_REGISTRY[ind_name][1] != SCALE_PRICE:
+        if INDICATOR_REGISTRY[ind_name].scale != SCALE_PRICE:
             return None
         return Condition(
             op=op,
@@ -328,7 +528,7 @@ def condition_from_genes(
         # oscillator-scale indicator [op] constant
         if ind_name not in INDICATOR_REGISTRY:
             return None
-        if INDICATOR_REGISTRY[ind_name][1] != SCALE_OSCILLATOR:
+        if INDICATOR_REGISTRY[ind_name].scale != SCALE_OSCILLATOR:
             return None
         return Condition(
             op=op,
@@ -339,7 +539,7 @@ def condition_from_genes(
         # indicator [op] indicator, both sides SAME scale
         if ind_name not in INDICATOR_REGISTRY or ind2_name not in INDICATOR_REGISTRY:
             return None
-        if INDICATOR_REGISTRY[ind_name][1] != INDICATOR_REGISTRY[ind2_name][1]:
+        if INDICATOR_REGISTRY[ind_name].scale != INDICATOR_REGISTRY[ind2_name].scale:
             return None
         return Condition(
             op=op,

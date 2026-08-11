@@ -34,6 +34,9 @@ from composable.conditions import (
     KIND_INDICATOR,
     Operand,
     Condition,
+    CONDITION_GENE_FIELDS,
+    build_global_param_keys,
+    build_parent_params,
     condition_from_genes,
 )
 from strategy.base import Strategy, StrategySignals, require_ohlcv
@@ -56,23 +59,8 @@ DEFAULT_EXIT_HOUR = 22  # H1 bar whose close is known at 23:00 fill
 DEFAULT_SESSION_DAYS = (2, 4)
 
 # Global param keys per indicator parent: (period_key, param2_key_or_None).
-# param2 is the second shared param (e.g. bb_stddev, macd_slow, stoch_d).
-PARENT_PARAMS: dict[str, tuple[str, str | None]] = {
-    "SMA": ("sma_period", None),
-    "EMA": ("ema_period", None),
-    "ATR": ("atr_period", None),
-    "RSI": ("rsi_period", None),
-    "CCI": ("cci_period", None),
-    "Stochastic": ("stoch_k", "stoch_d"),
-    "ADX": ("adx_period", None),
-    "Bollinger": ("bb_period", "bb_stddev"),
-    "MACD": ("macd_fast", "macd_slow"),
-    "Momentum": ("mom_period", None),
-    "WPR": ("wpr_period", None),
-    "MFI": ("mfi_period", None),
-    "OBV": (None, None),
-    "Ichimoku": ("ichi_tenkan", "ichi_kijun"),
-}
+# Derived from the single source of truth (INDICATOR_REGISTRY).
+PARENT_PARAMS = build_parent_params()
 
 
 class ComposableStrategy(Strategy):
@@ -254,7 +242,7 @@ class ComposableStrategy(Strategy):
         """Fill an indicator operand's period/param2 from global params."""
         if op.kind != KIND_INDICATOR or op.indicator is None:
             return
-        parent = INDICATOR_REGISTRY[op.indicator][0]
+        parent = INDICATOR_REGISTRY[op.indicator].parent
         period_key, param2_key = PARENT_PARAMS[parent]
         if period_key is not None:
             op.period = int(self.global_params.get(period_key, 14))
@@ -263,13 +251,8 @@ class ComposableStrategy(Strategy):
 
 
 # All global param keys (for filtering genes in the constructor).
-_GLOBAL_PARAM_KEYS = {
-    "sma_period", "ema_period", "atr_period", "rsi_period", "cci_period",
-    "stoch_k", "stoch_d", "stoch_slowing", "adx_period",
-    "bb_period", "bb_stddev", "macd_fast", "macd_slow",
-    "mom_period", "wpr_period", "mfi_period",
-    "ichi_tenkan", "ichi_kijun", "ichi_senkou",
-}
+# Derived from the single source of truth (INDICATOR_REGISTRY).
+_GLOBAL_PARAM_KEYS = build_global_param_keys()
 
 
 def build_param_space(

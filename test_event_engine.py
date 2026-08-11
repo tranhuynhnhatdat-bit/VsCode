@@ -1,9 +1,8 @@
 """Quick smoke test for the event-driven validation engine.
 
 Tests:
-1. TickSimulator generates valid synthetic ticks
-2. EventEngine runs end-to-end with minimal data
-3. validate_with_event_engine applies filters correctly
+1. EventEngine runs end-to-end with minimal data
+2. validate_with_event_engine applies filters correctly
 
 Run: python test_event_engine.py
 """
@@ -21,32 +20,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backtest.event_engine import (
-    TickSimulator,
     EventEngine,
     validate_with_event_engine,
 )
 from composable.composable import ComposableStrategy
-
-
-def test_tick_simulator() -> None:
-    """Test that tick simulator respects OHLC bounds and produces the right number of ticks."""
-    sim = TickSimulator(ticks_per_bar=20, seed=42)
-
-    # Bullish bar.
-    ticks = sim.generate_ticks(100.0, 105.0, 99.5, 104.0)
-    assert len(ticks) == 20, f"Expected 20 ticks, got {len(ticks)}"
-    assert ticks[0] == 100.0, f"First tick should be open, got {ticks[0]}"
-    assert ticks[-1] == 104.0, f"Last tick should be close, got {ticks[-1]}"
-    assert max(ticks) <= 105.0 + 1e-6, f"Max tick {max(ticks)} exceeds high"
-    assert min(ticks) >= 99.5 - 1e-6, f"Min tick {min(ticks)} below low"
-
-    # Bearish bar.
-    ticks2 = sim.generate_ticks(105.0, 105.5, 98.0, 99.0)
-    assert len(ticks2) == 20, f"Expected 20 ticks, got {len(ticks2)}"
-    assert ticks2[0] == 105.0
-    assert ticks2[-1] == 99.0
-
-    print("  [PASS] TickSimulator generates valid ticks")
 
 
 def test_event_engine_empty() -> None:
@@ -55,7 +32,6 @@ def test_event_engine_empty() -> None:
         symbol="XAUUSD",
         initial_capital=10_000.0,
         risk_money=100.0,
-        ticks_per_bar=20,
     )
 
     empty_idx = pd.DatetimeIndex([])
@@ -181,7 +157,6 @@ def test_event_engine_with_aligned_data() -> None:
         symbol="XAUUSD",
         initial_capital=10_000.0,
         risk_money=100.0,
-        ticks_per_bar=5,  # Fewer ticks for speed
     )
 
     # Build a pure-time ComposableStrategy (no conditions) and generate signals.
@@ -224,14 +199,16 @@ def test_validate_with_event_engine() -> None:
         "cond2_type": "none",
     }
 
+    strat = ComposableStrategy(**params)
+    signals = strat.generate(h1)
+
     result = validate_with_event_engine(
-        params=params,
-        m1_df=m1,
+        signals=signals,
         h1_df=h1,
+        m1_df=m1,
         symbol="XAUUSD",
         initial_capital=10_000.0,
         risk_money=100.0,
-        ticks_per_bar=5,
     )
 
     assert "passed" in result
@@ -246,9 +223,6 @@ def test_validate_with_event_engine() -> None:
 
 
 if __name__ == "__main__":
-    print("Testing TickSimulator...")
-    test_tick_simulator()
-
     print("\nTesting EventEngine (empty data)...")
     test_event_engine_empty()
 

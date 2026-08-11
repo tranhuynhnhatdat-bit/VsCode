@@ -1,6 +1,11 @@
 """TestEngine: genetic parameter optimization + multi-window validation."""
 
-from optimization.engine import TestEngine, OptimizationResult, PassingStrategy
+from optimization.engine import (
+    TestEngine,
+    OptimizationResult,
+    PassingStrategy,
+    PipelineConfig,
+)
 from optimization.genetic import (
     GAConfig,
     GAReport,
@@ -13,6 +18,7 @@ __all__ = [
     "TestEngine",
     "OptimizationResult",
     "PassingStrategy",
+    "PipelineConfig",
     "GAConfig",
     "GAReport",
     "GeneticOptimizer",

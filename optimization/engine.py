@@ -38,6 +38,7 @@ from typing import Any
 import pandas as pd
 
 from backtest.engine import BacktestEngine, BacktestResult, RESULTS_DIR
+from composable.conditions import condition_gene_names
 from data_manager import DataManager
 from optimization.genetic import GAConfig, GAReport, GeneticOptimizer, ParamSpace
 from strategy.base import Strategy
@@ -58,15 +59,9 @@ DEFAULT_M1_OOS_GATES: dict[str, dict[str, float]] = {
     "oos2": {"profit_factor": 1.1, "trades_per_month": 1.0},
 }
 # Condition-slot genes used for behavioral diversity (the composed filters).
-CONDITION_GENES = (
-    "connective",
-    "cond1_type", "cond1_op", "cond1_ind", "cond1_ind2",
-    "cond1_price", "cond1_price2", "cond1_threshold",
-    "cond2_type", "cond2_op", "cond2_ind", "cond2_ind2",
-    "cond2_price", "cond2_price2", "cond2_threshold",
-    "cond3_type", "cond3_op", "cond3_ind", "cond3_ind2",
-    "cond3_price", "cond3_price2", "cond3_threshold",
-)
+# Derived from the single source of truth (condition_gene_names) so the gene
+# layout stays in one place. The connective is also part of the signature.
+CONDITION_GENES = ("connective",) + condition_gene_names(3)
 DAYS_PER_MONTH = 30.44
 
 
@@ -217,6 +212,33 @@ class OptimizationResult:
     summary_path: Path | None = None
 
 
+@dataclass
+class PipelineConfig:
+    """Pipeline policy knobs for TestEngine (its "configuration" seam).
+
+    Groups the ~15 optional pipeline settings into one small object so the
+    TestEngine constructor stays focused on what it's actually running
+    (symbol, timeframe, strategy, params, capital). The surgical knobs
+    (gates, ratios, targets, data range, GA config) live here.
+    """
+
+    split: tuple[float, float, float] = (0.30, 0.50, 0.20)
+    constraints: list[tuple[str, str, str]] | None = None
+    fitness_criterion: str = "pf"
+    ga_config: GAConfig | None = None
+    htf_train_gates: dict[str, float] | None = None
+    m1_confirm_ratio: float = 0.9
+    m1_pf_cap: float = 10.0
+    m1_confirm_pf: float = 1.1
+    m1_oos_gates: dict[str, dict[str, float]] | None = None
+    results_dir: Path = RESULTS_DIR
+    start: str | None = None
+    end: str | None = None
+    collect_target: int = 500
+    diversity_threshold: int = 1
+    max_collect_evaluations: int = 50_000
+
+
 class TestEngine:
     """Runs Phase A (GA collection) + provides Phase B (M1 funnel)."""
 
@@ -226,41 +248,32 @@ class TestEngine:
         timeframe: str,
         strategy_class: type[Strategy],
         param_space: dict[str, Any],
-        split: tuple[float, float, float] = (0.30, 0.50, 0.20),
-        constraints: list[tuple[str, str, str]] | None = None,
         initial_capital: float = 10_000.0,
         risk_money: float = 100.0,
         strategy_name: str = "optimized",
-        ga_config: GAConfig | None = None,
-        fitness_criterion: str = "pf",
-        htf_train_gates: dict[str, float] | None = None,
-        m1_confirm_ratio: float = 0.9,
-        m1_pf_cap: float = 10.0,
-        m1_confirm_pf: float = 1.1,
-        m1_oos_gates: dict[str, dict[str, float]] | None = None,
-        results_dir: Path = RESULTS_DIR,
-        start: str | None = None,
-        end: str | None = None,
-        collect_target: int = 500,
-        diversity_threshold: int = 1,
-        max_collect_evaluations: int = 50_000,
+        config: PipelineConfig | None = None,
     ) -> None:
+        cfg = config or PipelineConfig()
+
         self.symbol = symbol
         self.timeframe = timeframe
         self.strategy_class = strategy_class
         self.param_space = param_space
-        self.split = tuple(split)
-        self.constraints = constraints
         self.initial_capital = initial_capital
         self.risk_money = risk_money
         self.strategy_name = strategy_name
-        self.ga_config = ga_config or GAConfig()
-        self.results_dir = Path(results_dir)
-        self.start = start
-        self.end = end
-        self.collect_target = collect_target
-        self.diversity_threshold = diversity_threshold
-        self.max_collect_evaluations = max_collect_evaluations
+        self.config = cfg
+
+        # Unpack the pipeline policy knobs from the config object.
+        self.split = tuple(cfg.split)
+        self.constraints = cfg.constraints
+        self.ga_config = cfg.ga_config or GAConfig()
+        self.results_dir = Path(cfg.results_dir)
+        self.start = cfg.start
+        self.end = cfg.end
+        self.collect_target = cfg.collect_target
+        self.diversity_threshold = cfg.diversity_threshold
+        self.max_collect_evaluations = cfg.max_collect_evaluations
 
         if (
             len(self.split) != 3
@@ -271,17 +284,17 @@ class TestEngine:
                 f"split must be 3 positive fractions summing to 1, "
                 f"got {self.split}"
             )
-        if fitness_criterion not in CRITERIA:
+        if cfg.fitness_criterion not in CRITERIA:
             raise ValueError(
                 f"fitness_criterion must be one of {CRITERIA}"
             )
-        self.fitness_criterion = fitness_criterion
+        self.fitness_criterion = cfg.fitness_criterion
 
-        self.htf_train_gates = htf_train_gates or DEFAULT_HTF_TRAIN_GATES
-        self.m1_confirm_ratio = m1_confirm_ratio
-        self.m1_pf_cap = m1_pf_cap
-        self.m1_confirm_pf = m1_confirm_pf
-        self.m1_oos_gates = m1_oos_gates or DEFAULT_M1_OOS_GATES
+        self.htf_train_gates = cfg.htf_train_gates or DEFAULT_HTF_TRAIN_GATES
+        self.m1_confirm_ratio = cfg.m1_confirm_ratio
+        self.m1_pf_cap = cfg.m1_pf_cap
+        self.m1_confirm_pf = cfg.m1_confirm_pf
+        self.m1_oos_gates = cfg.m1_oos_gates or DEFAULT_M1_OOS_GATES
         bad = set(self.m1_oos_gates) - {"oos1", "oos2"}
         if bad:
             raise ValueError(

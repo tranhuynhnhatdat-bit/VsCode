@@ -405,7 +405,7 @@ def run_m1(
         trades_df = pd.DataFrame()
         equity_series = pd.Series(dtype=float)
         return {
-            "metrics": _compute_metrics(equity_series, trades_df, initial_capital),
+            "metrics": compute_metrics(equity_series, trades_df, m1_index, initial_capital),
             "equity_curve": equity_series,
             "trades": trades_df,
         }
@@ -453,7 +453,7 @@ def run_m1(
     equity_series = _equity_to_series(eq_idx, eq_vals, m1_index)
 
     return {
-        "metrics": _compute_metrics(equity_series, trades_df, initial_capital),
+        "metrics": compute_metrics(equity_series, trades_df, m1_index, initial_capital),
         "equity_curve": equity_series,
         "trades": trades_df,
     }
@@ -495,12 +495,19 @@ def _equity_to_series(
     return s.resample("D").last().dropna()
 
 
-def _compute_metrics(
+def compute_metrics(
     equity_curve: pd.Series,
     trades_df: pd.DataFrame,
+    index: pd.DatetimeIndex,
     initial_capital: float,
 ) -> dict[str, float | str]:
-    """Compute performance metrics (shared by both engines)."""
+    """Compute performance metrics from a daily equity curve + trades.
+
+    Shared by both backtest engines (the vectorized HTF path in
+    ``backtest/engine.py`` and the Numba M1 core) so the metrics are computed
+    in exactly one place. ``index`` is the full bar index used to compute
+    exposure (fraction of bars spent in a position).
+    """
     zero_metrics: dict[str, float | str] = {
         "total_return_pct": 0.0,
         "cagr": 0.0,
@@ -515,7 +522,17 @@ def _compute_metrics(
     }
 
     if equity_curve.empty:
-        return zero_metrics
+        # No equity: fall back to the index for dates, if available.
+        if len(index) > 0:
+            base = {
+                **zero_metrics,
+                "exposure_pct": 0.0,
+                "start_date": str(pd.Timestamp(index[0]).date()),
+                "end_date": str(pd.Timestamp(index[-1]).date()),
+            }
+        else:
+            base = {**zero_metrics, "exposure_pct": 0.0}
+        return base
 
     final_equity = float(equity_curve.iloc[-1])
     total_return_pct = (final_equity / initial_capital - 1) * 100
@@ -550,6 +567,9 @@ def _compute_metrics(
             "sharpe": sharpe,
             "sortino": sortino,
             "final_equity": final_equity,
+            "exposure_pct": 0.0,
+            "start_date": str(start_date.date()),
+            "end_date": str(end_date.date()),
         }
 
     closed = trades_df[trades_df["status"] == 1] if not trades_df.empty else trades_df
@@ -566,6 +586,16 @@ def _compute_metrics(
         profit_factor = 0.0
         avg_trade_pct = 0.0
 
+    # Exposure: fraction of bars in a position (vectorized).
+    if not trades_df.empty and len(index) > 0:
+        held_bars = int(
+            (trades_df["exit_idx"].astype(int)
+             - trades_df["entry_idx"].astype(int) + 1).sum()
+        )
+        exposure_pct = float(held_bars / len(index) * 100)
+    else:
+        exposure_pct = 0.0
+
     return {
         "total_return_pct": total_return_pct,
         "cagr": cagr,
@@ -576,6 +606,7 @@ def _compute_metrics(
         "profit_factor": profit_factor,
         "n_trades": n_trades,
         "avg_trade_pct": avg_trade_pct,
+        "exposure_pct": exposure_pct,
         "final_equity": final_equity,
         "start_date": str(start_date.date()),
         "end_date": str(end_date.date()),

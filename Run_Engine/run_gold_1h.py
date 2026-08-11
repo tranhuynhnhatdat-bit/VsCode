@@ -43,7 +43,7 @@ import time
 import pandas as pd
 
 from composable.composable import ComposableStrategy, build_param_space
-from optimization.engine import TestEngine, PassingStrategy
+from optimization.engine import TestEngine, PassingStrategy, PipelineConfig
 from optimization.genetic import GAConfig
 from Render.strategy_md import describe_condition, render_strategy_md
 from backtest.event_engine import EventEngine, validate_with_event_engine
@@ -341,35 +341,37 @@ def main() -> None:
         timeframe="H1",
         strategy_class=ComposableStrategy,
         param_space=PARAM_SPACE,
-        constraints=[("macd_fast", "<", "macd_slow")],
-        split=(0.30, 0.50, 0.20),
-        fitness_criterion="pf",
-        htf_train_gates=HTF_TRAIN_GATES,
-        m1_confirm_pf=M1_CONFIRM_PF,
-        m1_oos_gates=M1_OOS_GATES,
-        strategy_name="composable",
-        results_dir=RESULTS_DIR,
-        start=START,
-        end=END,
         risk_money=100.0,
-        ga_config=GAConfig(
-            population=50,
-            generations=20,
-            tournament_k=3,
-            elitism=2,
-            mutation_rate=0.10,
-            early_stop_generations=3,
-            seed=None,
-            workers=6,
-            initial_population=[SEED_INDIVIDUAL],
-            islands=4,
-            migration_interval=8,
-            migration_count=2,
-            restart_stagnation=3,
+        strategy_name="composable",
+        config=PipelineConfig(
+            constraints=[("macd_fast", "<", "macd_slow")],
+            split=(0.30, 0.50, 0.20),
+            fitness_criterion="pf",
+            htf_train_gates=HTF_TRAIN_GATES,
+            m1_confirm_pf=M1_CONFIRM_PF,
+            m1_oos_gates=M1_OOS_GATES,
+            results_dir=RESULTS_DIR,
+            start=START,
+            end=END,
+            ga_config=GAConfig(
+                population=50,
+                generations=20,
+                tournament_k=3,
+                elitism=2,
+                mutation_rate=0.10,
+                early_stop_generations=3,
+                seed=None,
+                workers=6,
+                initial_population=[SEED_INDIVIDUAL],
+                islands=4,
+                migration_interval=8,
+                migration_count=2,
+                restart_stagnation=3,
+            ),
+            collect_target=COLLECT_TARGET,
+            diversity_threshold=DIVERSITY_THRESHOLD,
+            max_collect_evaluations=MAX_COLLECT_EVALUATIONS,
         ),
-        collect_target=COLLECT_TARGET,
-        diversity_threshold=DIVERSITY_THRESHOLD,
-        max_collect_evaluations=MAX_COLLECT_EVALUATIONS,
     )
 
     # ------------------------------------------------------------------ #
@@ -414,20 +416,20 @@ def main() -> None:
         htf_timeframe="H1",
         initial_capital=10_000.0,
         risk_money=100.0,
-        ticks_per_bar=20,
     )
 
     event_passing: list[PassingStrategy] = []
     for i, p in enumerate(m1_survivors):
         print(f"  Validating #{i} ... ", end="", flush=True)
+        strategy = ComposableStrategy(**p.params)
+        signals = strategy.generate(h1_df)
         ev_result = validate_with_event_engine(
-            params=p.params,
-            m1_df=m1_df,
+            signals=signals,
             h1_df=h1_df,
+            m1_df=m1_df,
             symbol="XAUUSD",
             initial_capital=10_000.0,
             risk_money=100.0,
-            ticks_per_bar=20,
             filters=EVENT_FILTERS,
             engine=event_engine,
         )

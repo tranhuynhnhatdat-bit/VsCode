@@ -33,12 +33,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from backtest._m1_core import run_m1
-from backtest._mapping import (
-    HTF_OFFSET as _HTF_OFFSET,
-    map_signals_to_m1,
-    map_stops_to_m1,
-)
+from backtest._m1_core import compute_metrics, run_m1
+from backtest._mapping import HTF_OFFSET as _HTF_OFFSET
 from data_manager import DataManager
 from symbol_info import SymbolInfo
 from strategy.base import StrategySignals
@@ -257,8 +253,8 @@ class BacktestEngine:
         )
         daily_equity = htf_equity_adj.resample("D").last().dropna()
 
-        metrics = self._compute_metrics(
-            daily_equity, trades, htf_df.index, htf_equity_adj
+        metrics = compute_metrics(
+            daily_equity, trades, htf_df.index, self.initial_capital
         )
 
         return BacktestResult(
@@ -269,25 +265,6 @@ class BacktestEngine:
             timeframe=self.timeframe,
             strategy_name=self.strategy_name,
         )
-
-    # ------------------------------------------------------------------ #
-    # HTF -> M1 mapping (shared with the event engine)
-    # ------------------------------------------------------------------ #
-    def _map_signals(
-        self, signals: StrategySignals, m1_index: pd.DatetimeIndex
-    ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
-        """Map HTF entry/exit signals to the M1 bar at/after each actionable time.
-
-        Delegates to the shared vectorized helper so both engines use the
-        exact same HTF -> M1 mapping.
-        """
-        return map_signals_to_m1(signals, m1_index, self.timeframe)
-
-    def _map_stops(
-        self, htf_stops: pd.Series, m1_index: pd.DatetimeIndex
-    ) -> pd.Series:
-        """Map HTF SL/TP to M1 via forward-fill (shared with the event engine)."""
-        return map_stops_to_m1(htf_stops, m1_index, self.timeframe)
 
     # ------------------------------------------------------------------ #
     # M1 preparation (cached)
@@ -321,49 +298,6 @@ class BacktestEngine:
         if "Spread" in df.columns:
             return df["Spread"].astype(float)
         return pd.Series(float(info["spread"]), index=df.index)
-
-    def _resolve_sl(
-        self,
-        signals: StrategySignals,
-        m1_entries: pd.Series,
-        m1_s_entries: pd.Series,
-        m1_open: pd.Series,
-        spread_points: pd.Series,
-        tick_size: float,
-        m1_index: pd.DatetimeIndex,
-    ) -> tuple[pd.Series, pd.Series]:
-        """Resolve SL into (absolute prices for vectorbt, distances for sizing).
-
-        Distance-based SL (sl_is_distance=True) is converted to an absolute
-        stop relative to the entry fill price:
-          - Long:  fill at ASK = open + spread; SL = ask - distance
-          - Short: fill at BID = open;          SL = bid + distance
-        This matches the MQL5 engine's SL placement (sl = ask - sl_atr*ATR).
-        """
-        if signals.sl_is_distance:
-            m1_sl_dist = self._map_stops(signals.sl_stop, m1_index)
-            spread_price = spread_points * tick_size
-            m1_sl_abs = pd.Series(np.nan, index=m1_index)
-
-            long_bars = m1_entries & m1_sl_dist.notna()
-            m1_sl_abs.loc[long_bars] = (
-                m1_open.loc[long_bars]
-                + spread_price.loc[long_bars]
-                - m1_sl_dist.loc[long_bars]
-            )
-            short_bars = m1_s_entries & m1_sl_dist.notna()
-            m1_sl_abs.loc[short_bars] = (
-                m1_open.loc[short_bars] + m1_sl_dist.loc[short_bars]
-            )
-            return m1_sl_abs.ffill(), m1_sl_dist
-
-        m1_sl_abs = self._map_stops(signals.sl_stop, m1_index)
-        m1_sl_dist = pd.Series(np.nan, index=m1_index)
-        long_bars = m1_entries & m1_sl_abs.notna()
-        m1_sl_dist.loc[long_bars] = m1_open.loc[long_bars] - m1_sl_abs.loc[long_bars]
-        short_bars = m1_s_entries & m1_sl_abs.notna()
-        m1_sl_dist.loc[short_bars] = m1_sl_abs.loc[short_bars] - m1_open.loc[short_bars]
-        return m1_sl_abs, m1_sl_dist
 
     def _resolve_sl_htf(
         self,
@@ -496,88 +430,6 @@ class BacktestEngine:
                 if last_pos is not None:
                     swap.iloc[last_pos] += rate * size * mult
         return swap
-
-    # ------------------------------------------------------------------ #
-    # Metrics
-    # ------------------------------------------------------------------ #
-    def _compute_metrics(
-        self,
-        daily_equity: pd.Series,
-        trades: pd.DataFrame,
-        m1_index: pd.DatetimeIndex,
-        m1_equity: pd.Series,
-    ) -> dict[str, float | str]:
-        final_equity = float(daily_equity.iloc[-1]) if len(daily_equity) else self.initial_capital
-        start_date = daily_equity.index[0] if len(daily_equity) else m1_index[0]
-        end_date = daily_equity.index[-1] if len(daily_equity) else m1_index[-1]
-
-        total_return_pct = (final_equity / self.initial_capital - 1) * 100
-
-        years = (end_date - start_date).days / 365.25
-        cagr = (
-            (final_equity / self.initial_capital) ** (1 / years) - 1
-            if years > 0 and final_equity > 0
-            else 0.0
-        )
-
-        # Max drawdown from daily equity.
-        running_max = daily_equity.cummax()
-        drawdown = (daily_equity - running_max) / running_max
-        max_drawdown_pct = float(drawdown.min() * 100) if len(drawdown) else 0.0
-
-        # Sharpe / Sortino from daily returns.
-        daily_returns = daily_equity.pct_change().dropna()
-        if len(daily_returns) > 1 and daily_returns.std() > 0:
-            sharpe = float(daily_returns.mean() / daily_returns.std() * np.sqrt(252))
-        else:
-            sharpe = 0.0
-        downside = daily_returns[daily_returns < 0]
-        if len(downside) > 0 and downside.std() > 0:
-            sortino = float(daily_returns.mean() / downside.std() * np.sqrt(252))
-        else:
-            sortino = 0.0
-
-        # Trade-based metrics.
-        closed = trades[trades["status"] == 1] if not trades.empty else trades
-        n_trades = int(len(closed))
-        if n_trades > 0:
-            pnls = closed["pnl"].astype(float)
-            win_rate = float((pnls > 0).mean() * 100)
-            gross_profit = float(pnls[pnls > 0].sum())
-            gross_loss = float(-pnls[pnls < 0].sum())
-            profit_factor = (
-                gross_profit / gross_loss if gross_loss > 0 else float("inf")
-            )
-            avg_trade_pct = float(closed["return"].astype(float).mean() * 100)
-        else:
-            win_rate = 0.0
-            profit_factor = 0.0
-            avg_trade_pct = 0.0
-
-        # Exposure: fraction of M1 bars in a position (vectorized).
-        if not trades.empty and len(m1_index) > 0:
-            held_bars = int(
-                (trades["exit_idx"].astype(int) - trades["entry_idx"].astype(int) + 1).sum()
-            )
-            exposure_pct = float(held_bars / len(m1_index) * 100)
-        else:
-            exposure_pct = 0.0
-
-        return {
-            "total_return_pct": total_return_pct,
-            "cagr": cagr,
-            "max_drawdown_pct": max_drawdown_pct,
-            "sharpe": sharpe,
-            "sortino": sortino,
-            "win_rate": win_rate,
-            "profit_factor": profit_factor,
-            "n_trades": n_trades,
-            "avg_trade_pct": avg_trade_pct,
-            "exposure_pct": exposure_pct,
-            "final_equity": final_equity,
-            "start_date": str(start_date.date()),
-            "end_date": str(end_date.date()),
-        }
 
     def _empty_result(self, start, end) -> BacktestResult:
         """Return a zeroed result when there is no M1 data."""

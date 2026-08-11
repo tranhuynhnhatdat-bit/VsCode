@@ -83,6 +83,13 @@ Available for `price_ind` and `price_price` condition types.
 
 ## 4. Indicator Registry
 
+> **Source of truth:** the tables below are derived from the single
+> `INDICATOR_REGISTRY` in `composable/conditions.py` (each line is an
+> `IndicatorSpec` carrying parent, scale, threshold, global param keys, and
+> the compute callable). Add or change an indicator line there only; the
+> GA param space, condition scale checks, and the strategy's global param
+> resolution all derive from it.
+
 ### 4.1 Price-Scale Indicators
 
 These produce values in the same range as price. Used in `price_ind` and `ind_ind` conditions.
