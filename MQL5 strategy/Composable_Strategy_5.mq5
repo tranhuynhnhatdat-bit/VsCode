@@ -50,6 +50,16 @@ input string InpSessionDays  = "3,5";   // Session days (MQL5: 0=Sun..6=Sat) -> 
 input int    InpMagicNumber  = 5;       // Magic number
 
 //+------------------------------------------------------------------+
+// -- Exit mode enum
+//+------------------------------------------------------------------+
+enum ENUM_EXIT_MODE
+  {
+   EXIT_SAME_DAY,     // Same day (no fallback)
+   EXIT_END_OF_WEEK   // End of week (Friday) fallback
+  };
+input ENUM_EXIT_MODE InpExitMode = EXIT_SAME_DAY; // Exit mode
+
+//+------------------------------------------------------------------+
 // -- Constants
 //+------------------------------------------------------------------+
 #define ATR_1 0      // iATR(_Symbol, PERIOD_H1, InpAtrPeriod)
@@ -116,7 +126,17 @@ void OnTick()
    int dayOfWeek = dt.day_of_week;   // 0=Sun..6=Sat
    int hour      = dt.hour;
 
-   //--- Is today a session day?
+   //--- END-OF-WEEK fallback close: force-close on literal Friday (MQL5
+   //--- weekday 5) at the exit hour, regardless of session-day membership.
+   //--- This is a hard deadline so a position never carries past the week.
+   if(InpExitMode == EXIT_END_OF_WEEK && dayOfWeek == 5 && hour == InpExitHour + 1)
+     {
+      if(HasOpenPosition())
+         g_trade.PositionClose(_Symbol, 0);
+      return;
+     }
+
+   //--- Is today a session day? (entry + same-day exit only)
    if(!IsSessionDay(dayOfWeek))
       return;
 

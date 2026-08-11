@@ -41,6 +41,15 @@ from strategy.base import Strategy, StrategySignals, require_ohlcv
 # Connective choices for the GA.
 CONNECTIVES = ("and", "or")
 
+# Exit modes: how a held position is eventually closed.
+#   same_day   - close at exit_hour on session days only (current behavior).
+#   end_of_week- close at exit_hour on session days; if still holding at the
+#                end of the trading week (literal Friday, weekday 4), force
+#                close there regardless of session-day membership.
+EXIT_MODES = ("same_day", "end_of_week")
+# Python weekday number for Friday (pandas: Mon=0 .. Sun=6).
+FRIDAY_WEEKDAY = 4
+
 # Default base skeleton (matches GoldSession's session days: Wed=2, Fri=4).
 DEFAULT_ENTRY_HOUR = 1  # H1 bar whose close is known at 02:00 fill
 DEFAULT_EXIT_HOUR = 22  # H1 bar whose close is known at 23:00 fill
@@ -76,6 +85,8 @@ class ComposableStrategy(Strategy):
       conditions: optional pre-built list of Condition objects (tests).
       sl_atr: ATR stop-loss multiplier (0 = no SL).
       atr_period: ATR period for the stop.
+      exit_mode: how to eventually close a held position — 'same_day' or
+        'end_of_week'. Manual per-strategy setting, NOT a GA gene.
       **genes: remaining kwargs are GA genes — global indicator params
         (sma_period, rsi_period, ...) plus per-slot genes (cond1_type,
         cond1_op, cond1_ind, cond1_ind2, cond1_price, cond1_price2,
@@ -94,6 +105,7 @@ class ComposableStrategy(Strategy):
         conditions: list[Condition] | None = None,
         sl_atr: float = 2.0,
         atr_period: int = 14,
+        exit_mode: str = "same_day",
         **genes: Any,
     ) -> None:
         self.entry_hour = entry_hour
@@ -105,6 +117,9 @@ class ComposableStrategy(Strategy):
         self.connective = connective
         self.sl_atr = sl_atr
         self.atr_period = atr_period
+        if exit_mode not in EXIT_MODES:
+            raise ValueError(f"exit_mode must be one of {EXIT_MODES}")
+        self.exit_mode = exit_mode
 
         # Store the global indicator params (Option B) for operand resolution.
         self.global_params = {
@@ -141,7 +156,8 @@ class ComposableStrategy(Strategy):
 
         entries = (base_entry & cond_ok).fillna(False).astype(bool)
 
-        # Exit: session day at exit hour, only on days that had an entry.
+        # Same-day exit: session day at exit hour, only on days that had an
+        # entry that day. This is the primary/intended close.
         entry_days = entries.index.normalize()[entries]
         is_exit_hour = pd.Series(
             df.index.hour == self.exit_hour, index=df.index
@@ -149,11 +165,32 @@ class ComposableStrategy(Strategy):
         day_has_entry = pd.Series(
             df.index.normalize().isin(entry_days), index=df.index
         )
-        exits = (
+        same_day_exits = (
             is_session & is_exit_hour & day_has_entry
         ).fillna(False).astype(bool)
 
-        # Holding state.
+        # Holding state after same-day exits (before the end-of-week fallback).
+        held_before_fallback = (
+            entries.astype(int).cumsum()
+            - same_day_exits.astype(int).cumsum().shift(1).fillna(0)
+        ) > 0
+
+        # End-of-week fallback: if still holding at the end of the trading
+        # week (literal Friday, weekday 4), force-close at exit_hour regardless
+        # of whether Friday is a configured session day. Bounded hard deadline
+        # — no further fallback after this.
+        fallback_exits = pd.Series(False, index=df.index)
+        if self.exit_mode == "end_of_week":
+            is_friday = pd.Series(
+                df.index.weekday == FRIDAY_WEEKDAY, index=df.index
+            )
+            fallback_exits = (
+                is_friday & is_exit_hour & held_before_fallback
+            ).fillna(False).astype(bool)
+
+        exits = (same_day_exits | fallback_exits).fillna(False).astype(bool)
+
+        # Final holding state (drives SL carry and position tracking).
         held = (
             entries.astype(int).cumsum()
             - exits.astype(int).cumsum().shift(1).fillna(0)

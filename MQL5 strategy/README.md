@@ -88,3 +88,22 @@ To keep the two engines matched, the MQL5 EA must:
   floored to `volume_step`, **rejected** (never clamped) if outside
   `[volume_min, volume_max]`.
 - One position at a time; positions only close at 23:00 same session or by SL.
+
+---
+
+## 5. Exit mode input (`InpExitMode`)
+
+Every EA has an `input ENUM_EXIT_MODE InpExitMode` (default `EXIT_SAME_DAY`):
+
+| Value | Behavior |
+|-------|----------|
+| `EXIT_SAME_DAY` (default) | Close at the session's exit hour (23:00) on session days only. No fallback. Matches the original behavior. |
+| `EXIT_END_OF_WEEK` | Same-day 23:00 close stays primary. **If still holding at the end of the trading week, force-close at 23:00 on literal Friday** (MQL5 weekday `5`), regardless of whether Friday is a configured session day. Bounded hard deadline — a position never carries past the week. |
+
+Key implementation note: the end-of-week close is checked **before** the
+`IsSessionDay` gate in `OnTick`, so it fires even on a non-session Friday.
+Entries and the normal same-day exit remain session-day-gated.
+
+This mirrors the Python `ComposableStrategy(exit_mode=...)` setting, keeping
+the two engines in parity. It is a manual per-strategy input — **not** a
+GA-optimized gene.

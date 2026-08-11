@@ -21,4 +21,10 @@ Thumbs.db
 
 # Optimization results (generated artifacts, not tracked)
 results/
-results_validation/
+
+# MQL5 strategy source + compiled binaries (not tracked; README.md is kept)
+MQL5 strategy/*.mq5
+MQL5 strategy/*.ex5
+MQL5 strategy/**/*.mq5
+MQL5 strategy/**/*.ex5
+

@@ -23,10 +23,18 @@ The GA (genetic algorithm) composes conditions from a pool of indicators and ope
 | `atr_period` | 14 | ATR lookback period |
 | `max_conditions` | 3 | Number of condition slots (0 = pure time) |
 | `connective` | "and" | How conditions combine: `"and"` or `"or"` |
+| `exit_mode` | "same_day" | How a held position is eventually closed: `"same_day"` or `"end_of_week"`. Manual per-strategy setting, **not** a GA gene. |
 
 **Entry logic:** Session day AND entry_hour bar Close < Open (bearish) → BUY at ASK on the first M1 tick at hour+1.
 
 **Exit logic:** Session day at exit_hour → close position at BID on the first M1 tick at hour+1.
+
+**Exit modes:**
+- `same_day` (default): close at `exit_hour` on session days only. No fallback.
+- `end_of_week`: same-day close stays primary; if still holding at the end of the
+  trading week, force-close at `exit_hour` on **literal Friday** (Python weekday 4),
+  regardless of whether Friday is a session day. Bounded hard deadline — a position
+  never carries past the week. Mirrors the MQL5 `InpExitMode` input.
 
 ---
 

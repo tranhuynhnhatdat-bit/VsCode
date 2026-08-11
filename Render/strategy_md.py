@@ -115,9 +115,52 @@ def render_strategy_md(
         f"             {describe_condition(c)}" for c in strat.conditions
     ) or "             (none)"
 
+    # Exit-mode awareness: same_day (default) vs end_of_week fallback.
+    exit_mode = getattr(strat, "exit_mode", "same_day")
+    if exit_mode == "end_of_week":
+        exit_note = (
+            "**Exit mode:** `end_of_week` — the same-day CLOSE is primary; if still "
+            "holding at the end of the trading week, force-close at "
+            f"{exit_fill:02d}:00 on Friday regardless of session-day membership "
+            "(hard deadline, no carry past the week)."
+        )
+        exit_pseudo = (
+            f"  EXIT : day IN (Wed, Fri)\n"
+            f"         AND hour == {strat.exit_hour:02d}:00            # signal bar -> fill ~{exit_fill:02d}:00 M1\n"
+            f"         AND a position was opened this session\n"
+            f"         -> CLOSE — fill at BID (open)\n\n"
+            f"  FALLBACK: if still holding at {exit_fill:02d}:00 on Friday (day == 4)\n"
+            f"         -> CLOSE — force-close at BID, regardless of session-day membership"
+        )
+        exit_narrative = (
+            f"### Exit — {exit_fill:02d}:00\n"
+            f"- The exit signal is computed on the closed `{strat.exit_hour:02d}:00` H1 bar and\n"
+            f"  filled at the first M1 tick at/after {exit_fill:02d}:00, selling at BID (open).\n"
+            f"- Only fires on a day that actually opened a position.\n"
+            f"- **End-of-week fallback:** if the position is still open at the end of the\n"
+            f"  trading week, it is force-closed at {exit_fill:02d}:00 on Friday (day == 4),\n"
+            f"  even if Friday is not a session day. This caps the maximum holding time."
+        )
+    else:
+        exit_note = "**Exit mode:** `same_day` — close at the session's exit hour only."
+        exit_pseudo = (
+            f"  EXIT : day IN (Wed, Fri)\n"
+            f"         AND hour == {strat.exit_hour:02d}:00            # signal bar -> fill ~{exit_fill:02d}:00 M1\n"
+            f"         AND a position was opened this session\n"
+            f"         -> CLOSE — fill at BID (open)"
+        )
+        exit_narrative = (
+            f"### Exit — {exit_fill:02d}:00\n"
+            f"- The exit signal is computed on the closed `{strat.exit_hour:02d}:00` H1 bar and\n"
+            f"  filled at the first M1 tick at/after {exit_fill:02d}:00, selling at BID (open).\n"
+            f"- Only fires on a day that actually opened a position."
+        )
+
     md = f"""# Composable Strategy — XAUUSD H1
 
 **Base:** Long-only session trade — **BUY at {entry_fill:02d}:00, CLOSE at {exit_fill:02d}:00** on **Wednesday and Friday**, symbol **XAUUSD**.
+
+{exit_note}
 
 **Gating conditions:** {connective_word}:
 {cond_md}
@@ -140,10 +183,7 @@ ON each closed H1 bar:
 {cond_block}
          -> BUY (long) — fill at ASK (open + spread)
 
-  EXIT : day IN (Wed, Fri)
-         AND hour == {strat.exit_hour:02d}:00            # signal bar -> fill ~{exit_fill:02d}:00 M1
-         AND a position was opened this session
-         -> CLOSE — fill at BID (open)
+{exit_pseudo}
 
   RISK : on BUY, SL = entry_ask − {strat.sl_atr:.1f} × ATR({strat.atr_period})
 ```
@@ -157,10 +197,7 @@ ON each closed H1 bar:
 - Conditions (evaluated on that same bar):
 {cond_nested_md}
 
-### Exit — {exit_fill:02d}:00
-- The exit signal is computed on the closed `{strat.exit_hour:02d}:00` H1 bar and
-  filled at the first M1 tick at/after {exit_fill:02d}:00, selling at BID (open).
-- Only fires on a day that actually opened a position.
+{exit_narrative}
 
 ### Risk management
 - **Stop loss:** fixed ATR multiple, set at entry and carried while held:
